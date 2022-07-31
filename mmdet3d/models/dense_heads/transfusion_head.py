@@ -589,11 +589,11 @@ class FFN(nn.Module):
 
         return ret_dict
 
-
 @HEADS.register_module()
 class TransFusionHead(nn.Module):
     def __init__(self,
                  fuse_img=False,
+                 fuse_img_decoder=True,
                  num_views=0,
                  in_channels_img=64,
                  out_size_factor_img=4,
@@ -604,6 +604,7 @@ class TransFusionHead(nn.Module):
                  num_classes=4,
                  # config for Transformer
                  num_decoder_layers=3,
+                 num_fusion_layers=1,
                  num_heads=8,
                  learnable_query_pos=False,
                  initialize_by_heatmap=False,
@@ -636,6 +637,7 @@ class TransFusionHead(nn.Module):
         self.in_channels = in_channels
         self.num_heads = num_heads
         self.num_decoder_layers = num_decoder_layers
+        self.num_fusion_layers = num_fusion_layers
         self.bn_momentum = bn_momentum
         self.learnable_query_pos = learnable_query_pos
         self.initialize_by_heatmap = initialize_by_heatmap
@@ -692,24 +694,28 @@ class TransFusionHead(nn.Module):
             self.query_feat = nn.Parameter(torch.randn(1, hidden_channel, self.num_proposals))
             self.query_pos = nn.Parameter(torch.rand([1, self.num_proposals, 2]), requires_grad=learnable_query_pos)
 
-        # transformer decoder layers for object query with LiDAR feature
+        # transformer decoder layers/prediction heads for object query with LiDAR feature
         self.decoder = nn.ModuleList()
+        self.prediction_heads = nn.ModuleList()
         for i in range(self.num_decoder_layers):
+            # transformer decoder layer
             self.decoder.append(
                 TransformerDecoderLayer(
                     hidden_channel, num_heads, ffn_channel, dropout, activation,
                     self_posembed=PositionEmbeddingLearned(2, hidden_channel),
                     cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
                 ))
-
-        # Prediction Head
-        self.prediction_heads = nn.ModuleList()
-        for i in range(self.num_decoder_layers):
+            
+            #Prediction Heads
             heads = copy.deepcopy(common_heads)
             heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
             self.prediction_heads.append(FFN(hidden_channel, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
 
         self.fuse_img = fuse_img
+        self.fuse_img_decoder = False
+        if self.fuse_img:
+            self.fuse_img_decoder=fuse_img_decoder
+
         if self.fuse_img:
             self.num_views = num_views
             self.out_size_factor_img = out_size_factor_img
@@ -722,13 +728,19 @@ class TransFusionHead(nn.Module):
                 bias=bias,
             )
             self.heatmap_head_img = copy.deepcopy(self.heatmap_head)
-            # transformer decoder layers for img fusion
-            self.decoder.append(
-                TransformerDecoderLayer(
-                    hidden_channel, num_heads, ffn_channel, dropout, activation,
-                    self_posembed=PositionEmbeddingLearned(2, hidden_channel),
-                    cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
-                ))
+            # transformer decoder layers/prediction for img fusion
+            for i in range(self.num_fusion_layers):
+                self.decoder.append(
+                    TransformerDecoderLayer(
+                        hidden_channel, num_heads, ffn_channel, dropout, activation,
+                        self_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                        cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
+                    ))
+
+                heads = copy.deepcopy(common_heads)
+                heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
+                self.prediction_heads.append(FFN(hidden_channel * 2, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
+            
             # cross-attention only layers for projecting img feature onto BEV
             for i in range(num_views):
                 self.decoder.append(
@@ -739,10 +751,6 @@ class TransFusionHead(nn.Module):
                         cross_only=True,
                     ))
             self.fc = nn.Sequential(*[nn.Conv1d(hidden_channel, hidden_channel, kernel_size=1)])
-
-            heads = copy.deepcopy(common_heads)
-            heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
-            self.prediction_heads.append(FFN(hidden_channel * 2, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
 
         self.init_weights()
         self._init_assigner_sampler()
@@ -829,9 +837,9 @@ class TransFusionHead(nn.Module):
                 img_feat_collapsed_pos = self.img_feat_collapsed_pos
 
             bev_feat = lidar_feat_flatten
+            assert len(self.decoder)==self.num_decoder_layers+self.num_fusion_layers+self.num_views
             for idx_view in range(self.num_views):
-                bev_feat = self.decoder[2 + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
-
+                bev_feat = self.decoder[self.num_decoder_layers + self.num_fusion_layers + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
         #################################
         # image guided query initialization
         #################################
@@ -852,14 +860,14 @@ class TransFusionHead(nn.Module):
             if self.test_cfg['dataset'] == 'nuScenes':
                 local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
                 local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
-            elif self.test_cfg['dataset'] == 'Waymo':  # for Pedestrian & Cyclist in Waymo
-                local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
-                local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
+            # elif self.test_cfg['dataset'] in ['Waymo','VODDataset']:  # for Pedestrian & Cyclist in Waymo and VOD
+            #     local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
+            #     local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
             heatmap = heatmap * (heatmap == local_max)
             heatmap = heatmap.view(batch_size, heatmap.shape[1], -1)
 
             # top #num_proposals among all classes
-            top_proposals = heatmap.view(batch_size, -1).argsort(dim=-1, descending=True)[..., :self.num_proposals]
+            top_proposals = heatmap.contiguous().view(batch_size, -1).argsort(dim=-1, descending=True)[..., :self.num_proposals]
             top_proposals_class = top_proposals // heatmap.shape[-1]
             top_proposals_index = top_proposals % heatmap.shape[-1]
             query_feat = lidar_feat_flatten.gather(index=top_proposals_index[:, None, :].expand(-1, lidar_feat_flatten.shape[1], -1), dim=-1)
@@ -890,7 +898,7 @@ class TransFusionHead(nn.Module):
             res_layer = self.prediction_heads[i](query_feat)
             res_layer['center'] = res_layer['center'] + query_pos.permute(0, 2, 1)
             first_res_layer = res_layer
-            if not self.fuse_img:
+            if not self.fuse_img_decoder:
                 ret_dicts.append(res_layer)
 
             # for next level positional embedding
@@ -899,7 +907,10 @@ class TransFusionHead(nn.Module):
         #################################
         # transformer decoder layer (img feature as K,V)
         #################################
-        if self.fuse_img:
+        if self.fuse_img_decoder:
+            # initialize
+            self.on_the_image_mask = torch.BoolTensor(batch_size,0).cuda()
+
             # positional encoding for image fusion
             img_feat = raw_img_feat.permute(0, 3, 1, 2, 4) # [BS, n_views, C, H, W]
             img_feat_flatten = img_feat.view(batch_size, self.num_views, num_channel, -1)  # [BS, n_views, C, H*W]
@@ -909,105 +920,118 @@ class TransFusionHead(nn.Module):
             else:
                 img_feat_pos = self.img_feat_pos
 
-            prev_query_feat = query_feat.detach().clone()
-            query_feat = torch.zeros_like(query_feat)  # create new container for img query feature
-            query_pos_realmetric = query_pos.permute(0, 2, 1) * self.test_cfg['out_size_factor'] * self.test_cfg['voxel_size'][0] + self.test_cfg['pc_range'][0]
-            query_pos_3d = torch.cat([query_pos_realmetric, res_layer['height']], dim=1).detach().clone()
-            if 'vel' in res_layer:
-                vel = copy.deepcopy(res_layer['vel'].detach())
-            else:
-                vel = None
-            pred_boxes = self.bbox_coder.decode(
-                copy.deepcopy(res_layer['heatmap'].detach()),
-                copy.deepcopy(res_layer['rot'].detach()),
-                copy.deepcopy(res_layer['dim'].detach()),
-                copy.deepcopy(res_layer['center'].detach()),
-                copy.deepcopy(res_layer['height'].detach()),
-                vel,
-            )
-
-            on_the_image_mask = torch.ones([batch_size, self.num_proposals]).to(query_pos_3d.device) * -1
-
-            for sample_idx in range(batch_size if self.fuse_img else 0):
-                lidar2img_rt = query_pos_3d.new_tensor(img_metas[sample_idx]['lidar2img'])
-                img_scale_factor = (
-                    query_pos_3d.new_tensor(img_metas[sample_idx]['scale_factor'][:2]
-                                            if 'scale_factor' in img_metas[sample_idx].keys() else [1.0, 1.0]))
-                img_flip = img_metas[sample_idx]['flip'] if 'flip' in img_metas[sample_idx].keys() else False
-                img_crop_offset = (
-                    query_pos_3d.new_tensor(img_metas[sample_idx]['img_crop_offset'])
-                    if 'img_crop_offset' in img_metas[sample_idx].keys() else 0)
-                img_shape = img_metas[sample_idx]['img_shape'][:2]
-                img_pad_shape = img_metas[sample_idx]['input_shape'][:2]
-                boxes = LiDARInstance3DBoxes(pred_boxes[sample_idx]['bboxes'][:, :7], box_dim=7)
-                query_pos_3d_with_corners = torch.cat([query_pos_3d[sample_idx], boxes.corners.permute(2, 0, 1).view(3, -1)], dim=-1)  # [3, num_proposals] + [3, num_proposals*8]
-                # transform point clouds back to original coordinate system by reverting the data augmentation
-                if batch_size == 1:  # skip during inference to save time
-                    points = query_pos_3d_with_corners.T
+            # modified: add a for-loop
+            lidar_query_feat = query_feat.detach().clone()
+            for i in range(self.num_fusion_layers):
+                prev_query_feat = query_feat.detach().clone()   
+                query_feat = torch.zeros_like(query_feat)  # create new container for img query feature
+                query_pos_realmetric = query_pos.permute(0, 2, 1) * self.test_cfg['out_size_factor'] * self.test_cfg['voxel_size'][0] + self.test_cfg['pc_range'][0]
+                query_pos_3d = torch.cat([query_pos_realmetric, res_layer['height']], dim=1).detach().clone()
+                if 'vel' in res_layer:
+                    vel = copy.deepcopy(res_layer['vel'].detach())
                 else:
-                    points = apply_3d_transformation(query_pos_3d_with_corners.T, 'LIDAR', img_metas[sample_idx], reverse=True).detach()
-                num_points = points.shape[0]
+                    vel = None
+                pred_boxes = self.bbox_coder.decode(
+                    copy.deepcopy(res_layer['heatmap'].detach()),
+                    copy.deepcopy(res_layer['rot'].detach()),
+                    copy.deepcopy(res_layer['dim'].detach()),
+                    copy.deepcopy(res_layer['center'].detach()),
+                    copy.deepcopy(res_layer['height'].detach()),
+                    vel,
+                )
 
-                for view_idx in range(self.num_views):
-                    pts_4d = torch.cat([points, points.new_ones(size=(num_points, 1))], dim=-1)
-                    pts_2d = pts_4d @ lidar2img_rt[view_idx].t()
+                on_the_image_mask = torch.ones([batch_size, self.num_proposals]).to(query_pos_3d.device) * -1
 
-                    pts_2d[:, 2] = torch.clamp(pts_2d[:, 2], min=1e-5)
-                    pts_2d[:, 0] /= pts_2d[:, 2]
-                    pts_2d[:, 1] /= pts_2d[:, 2]
+                for sample_idx in range(batch_size if self.fuse_img else 0):
+                    lidar2img_rt = query_pos_3d.new_tensor(img_metas[sample_idx]['lidar2img'])
+                    img_scale_factor = (
+                        query_pos_3d.new_tensor(img_metas[sample_idx]['scale_factor'][:2]
+                                                if 'scale_factor' in img_metas[sample_idx].keys() else [1.0, 1.0]))
+                    img_flip = img_metas[sample_idx]['flip'] if 'flip' in img_metas[sample_idx].keys() else False
+                    img_crop_offset = (
+                        query_pos_3d.new_tensor(img_metas[sample_idx]['img_crop_offset'])
+                        if 'img_crop_offset' in img_metas[sample_idx].keys() else 0)
+                    img_shape = img_metas[sample_idx]['img_shape'][:2]
+                    img_pad_shape = img_metas[sample_idx]['input_shape'][:2]
+                    boxes = LiDARInstance3DBoxes(pred_boxes[sample_idx]['bboxes'][:, :7], box_dim=7)
+                    query_pos_3d_with_corners = torch.cat([query_pos_3d[sample_idx], boxes.corners.permute(2, 0, 1).view(3, -1)], dim=-1)  # [3, num_proposals] + [3, num_proposals*8]
+                    # transform point clouds back to original coordinate system by reverting the data augmentation
+                    if batch_size == 1:  # skip during inference to save time
+                        points = query_pos_3d_with_corners.T
+                    else:
+                        points = apply_3d_transformation(query_pos_3d_with_corners.T, 'LIDAR', img_metas[sample_idx], reverse=True).detach()
+                    num_points = points.shape[0]
 
-                    # img transformation: scale -> crop -> flip
-                    # the image is resized by img_scale_factor
-                    img_coors = pts_2d[:, 0:2] * img_scale_factor  # Nx2
-                    img_coors -= img_crop_offset
+                    for view_idx in range(self.num_views):
+                        # project lidar to img
+                        pts_4d = torch.cat([points, points.new_ones(size=(num_points, 1))], dim=-1)
+                        pts_2d = pts_4d @ lidar2img_rt[view_idx].t()
 
-                    # grid sample, the valid grid range should be in [-1,1]
-                    coor_x, coor_y = torch.split(img_coors, 1, dim=1)  # each is Nx1
+                        pts_2d[:, 2] = torch.clamp(pts_2d[:, 2], min=1e-5)
+                        pts_2d[:, 0] /= pts_2d[:, 2]
+                        pts_2d[:, 1] /= pts_2d[:, 2]
 
-                    if img_flip:
-                        # by default we take it as horizontal flip
-                        # use img_shape before padding for flip
-                        orig_h, orig_w = img_shape
-                        coor_x = orig_w - coor_x
+                        # img transformation: scale -> crop -> flip
+                        # the image is resized by img_scale_factor
+                        img_coors = pts_2d[:, 0:2] * img_scale_factor  # Nx2
+                        img_coors -= img_crop_offset
 
-                    coor_x, coor_corner_x = coor_x[0:self.num_proposals, :], coor_x[self.num_proposals:, :]
-                    coor_y, coor_corner_y = coor_y[0:self.num_proposals, :], coor_y[self.num_proposals:, :]
-                    coor_corner_x = coor_corner_x.reshape(self.num_proposals, 8, 1)
-                    coor_corner_y = coor_corner_y.reshape(self.num_proposals, 8, 1)
-                    coor_corner_xy = torch.cat([coor_corner_x, coor_corner_y], dim=-1)
+                        # grid sample, the valid grid range should be in [-1,1]
+                        coor_x, coor_y = torch.split(img_coors, 1, dim=1)  # each is Nx1
 
-                    h, w = img_pad_shape
-                    on_the_image = (coor_x > 0) * (coor_x < w) * (coor_y > 0) * (coor_y < h)
-                    on_the_image = on_the_image.squeeze()
-                    # skip the following computation if no object query fall on current image
-                    if on_the_image.sum() <= 1:
-                        continue
-                    on_the_image_mask[sample_idx, on_the_image] = view_idx
+                        if img_flip:
+                            # by default we take it as horizontal flip
+                            # use img_shape before padding for flip
+                            orig_h, orig_w = img_shape
+                            coor_x = orig_w - coor_x
 
-                    # add spatial constraint
-                    center_ys = (coor_y[on_the_image] / self.out_size_factor_img)
-                    center_xs = (coor_x[on_the_image] / self.out_size_factor_img)
-                    centers = torch.cat([center_xs, center_ys], dim=-1).int()  # center on the feature map
-                    corners = (coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values) / self.out_size_factor_img
-                    radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()  # radius of the minimum circumscribed circle of the wireframe
-                    sigma = (radius * 2 + 1) / 6.0
-                    distance = (centers[:, None, :] - (img_feat_pos - 0.5)).norm(dim=-1) ** 2
-                    gaussian_mask = (-distance / (2 * sigma[:, None] ** 2)).exp()
-                    gaussian_mask[gaussian_mask < torch.finfo(torch.float32).eps] = 0
-                    attn_mask = gaussian_mask
+                        coor_x, coor_corner_x = coor_x[0:self.num_proposals, :], coor_x[self.num_proposals:, :]
+                        coor_y, coor_corner_y = coor_y[0:self.num_proposals, :], coor_y[self.num_proposals:, :]
+                        coor_corner_x = coor_corner_x.reshape(self.num_proposals, 8, 1)
+                        coor_corner_y = coor_corner_y.reshape(self.num_proposals, 8, 1)
+                        coor_corner_xy = torch.cat([coor_corner_x, coor_corner_y], dim=-1)
 
-                    query_feat_view = prev_query_feat[sample_idx, :, on_the_image]
-                    query_pos_view = torch.cat([center_xs, center_ys], dim=-1)
-                    query_feat_view = self.decoder[self.num_decoder_layers](query_feat_view[None], img_feat_flatten[sample_idx:sample_idx + 1, view_idx], query_pos_view[None], img_feat_pos, attn_mask=attn_mask.log())
-                    query_feat[sample_idx, :, on_the_image] = query_feat_view.clone()
+                        h, w = img_pad_shape
+                        on_the_image = (coor_x > 0) * (coor_x < w) * (coor_y > 0) * (coor_y < h)
+                        on_the_image = on_the_image.squeeze()
+                        # skip the following computation if no object query fall on current image
+                        if on_the_image.sum() <= 1:
+                            continue
+                        on_the_image_mask[sample_idx, on_the_image] = view_idx
 
-            self.on_the_image_mask = (on_the_image_mask != -1)
-            res_layer = self.prediction_heads[self.num_decoder_layers](torch.cat([query_feat, prev_query_feat], dim=1))
-            res_layer['center'] = res_layer['center'] + query_pos.permute(0, 2, 1)
-            for key, value in res_layer.items():
-                pred_dim = value.shape[1]
-                res_layer[key][~self.on_the_image_mask.unsqueeze(1).repeat(1, pred_dim, 1)] = first_res_layer[key][~self.on_the_image_mask.unsqueeze(1).repeat(1, pred_dim, 1)]
-            ret_dicts.append(res_layer)
+                        # add spatial constraint
+                        center_ys = (coor_y[on_the_image] / self.out_size_factor_img)
+                        center_xs = (coor_x[on_the_image] / self.out_size_factor_img)
+                        centers = torch.cat([center_xs, center_ys], dim=-1).int()  # center on the feature map
+                        corners = (coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values) / self.out_size_factor_img
+                        radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()  # radius of the minimum circumscribed circle of the wireframe
+                        sigma = (radius * 2 + 1) / 6.0
+                        distance = (centers[:, None, :] - (img_feat_pos - 0.5)).norm(dim=-1) ** 2
+                        gaussian_mask = (-distance / (2 * sigma[:, None] ** 2)).exp()
+                        gaussian_mask[gaussian_mask < torch.finfo(torch.float32).eps] = 0
+                        attn_mask = gaussian_mask
+
+                        query_feat_view = prev_query_feat[sample_idx, :, on_the_image]
+                        query_pos_view = torch.cat([center_xs, center_ys], dim=-1)
+                        query_feat_view = self.decoder[self.num_decoder_layers+i](query_feat_view[None], img_feat_flatten[sample_idx:sample_idx + 1, view_idx], query_pos_view[None], img_feat_pos, attn_mask=attn_mask.log())
+                        query_feat[sample_idx, :, on_the_image] = query_feat_view.clone()
+                
+                if self.auxiliary:
+                    self.on_the_image_mask = torch.cat([self.on_the_image_mask,(on_the_image_mask != -1)],1)
+                else:
+                    self.on_the_image_mask = (on_the_image_mask != -1)
+
+                res_layer = self.prediction_heads[self.num_decoder_layers+i](torch.cat([query_feat, lidar_query_feat], dim=1))
+                res_layer['center'] = res_layer['center'] + query_pos.permute(0, 2, 1)
+                for key, value in res_layer.items():
+                    pred_dim = value.shape[1]
+                    # update the point feature that are not on the image with the first res layer
+                    # !!! This might reduce the result because the gt are only on the image
+                    res_layer[key][~self.on_the_image_mask[:,-self.num_proposals:].unsqueeze(1).repeat(1, pred_dim, 1)] = \
+                         first_res_layer[key][~self.on_the_image_mask[:,-self.num_proposals:].unsqueeze(1).repeat(1, pred_dim, 1)]
+                ret_dicts.append(res_layer)
+                # for next level positional embedding
+                query_pos = res_layer['center'].detach().clone().permute(0, 2, 1)
 
         if self.initialize_by_heatmap:
             ret_dicts[0]['query_heatmap_score'] = heatmap.gather(index=top_proposals_index[:, None, :].expand(-1, self.num_classes, -1), dim=-1)  # [bs, num_classes, num_proposals]
@@ -1122,7 +1146,8 @@ class TransFusionHead(nn.Module):
         gt_bboxes_tensor = gt_bboxes_3d.tensor.to(score.device)
         # each layer should do label assign seperately.
         if self.auxiliary:
-            num_layer = self.num_decoder_layers
+            num_layer = self.num_decoder_layers if not self.fuse_img_decoder else self.num_fusion_layers
+            # assert self.fuse_img or self.num_fusion_layers==1, ("auxiliary is not support for multiple img fusion part yet")
         else:
             num_layer = 1
 
@@ -1244,8 +1269,13 @@ class TransFusionHead(nn.Module):
             loss_dict['loss_heatmap'] = loss_heatmap
 
         # compute loss for each layer
-        for idx_layer in range(self.num_decoder_layers if self.auxiliary else 1):
-            if idx_layer == self.num_decoder_layers - 1 or (idx_layer == 0 and self.auxiliary is False):
+        if self.auxiliary:
+            num_layers = self.num_decoder_layers if not self.fuse_img_decoder else self.num_fusion_layers
+        else:
+            num_layers = 1
+
+        for idx_layer in range(num_layers):
+            if (idx_layer == self.num_fusion_layers - 1 and self.fuse_img_decoder) or (idx_layer == self.num_decoder_layers - 1 and not self.fuse_img_decoder) or (idx_layer == 0 and self.auxiliary is False):
                 prefix = 'layer_-1'
             else:
                 prefix = f'layer_{idx_layer}'

@@ -15,6 +15,11 @@ from .semantickitti_dataset import SemanticKITTIDataset
 from .sunrgbd_dataset import SUNRGBDDataset
 from .waymo_dataset import WaymoDataset
 
+### customize pipeline ###
+from .vod2d_dataset import VOD2DDataset
+from .vod_dataset import VODDataset
+from .pipelines import PointsRangeFilter2
+
 __all__ = [
     'KittiDataset', 'GroupSampler', 'DistributedGroupSampler',
     'build_dataloader', 'RepeatFactorDataset', 'DATASETS', 'build_dataset',
@@ -24,5 +29,7 @@ __all__ = [
     'LoadPointsFromFile', 'NormalizePointsColor', 'IndoorPointSample',
     'LoadAnnotations3D', 'SUNRGBDDataset', 'ScanNetDataset',
     'SemanticKITTIDataset', 'Custom3DDataset', 'LoadPointsFromMultiSweeps',
-    'WaymoDataset', 'BackgroundPointsFilter', 'VoxelBasedPointSampler'
+    'WaymoDataset', 'BackgroundPointsFilter', 'VoxelBasedPointSampler',
+
+    'PointsRangeFilter2', 'VODDataset', "VOD2DDataset"
 ]

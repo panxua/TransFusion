@@ -27,8 +27,10 @@ def get_thresholds(scores: np.ndarray, num_gt, num_sample_pts=41):
 
 def clean_data(gt_anno, dt_anno, current_class, difficulty):
     CLASS_NAMES = ['car', 'pedestrian', 'cyclist']
-    MIN_HEIGHT = [40, 25, 25]
-    MAX_OCCLUSION = [0, 1, 2]
+    MIN_HEIGHT = [40]
+    MAX_OCCLUSION = [4]
+    # MIN_HEIGHT = [40, 25, 25]
+    # MAX_OCCLUSION = [0, 1, 2]
     MAX_TRUNCATION = [0.15, 0.3, 0.5]
     dc_bboxes, ignored_gt, ignored_dt = [], [], []
     current_cls_name = CLASS_NAMES[current_class].lower()
@@ -51,7 +53,7 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
             valid_class = -1
         ignore = False
         if ((gt_anno['occluded'][i] > MAX_OCCLUSION[difficulty])
-                or (gt_anno['truncated'][i] > MAX_TRUNCATION[difficulty])
+                # or (gt_anno['truncated'][i] > MAX_TRUNCATION[difficulty])
                 or (height <= MIN_HEIGHT[difficulty])):
             ignore = True
         if valid_class == 1 and not ignore:
@@ -360,8 +362,8 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_parts=50):
         gt_annos_part = gt_annos[example_idx:example_idx + num_part]
         dt_annos_part = dt_annos[example_idx:example_idx + num_part]
         if metric == 0:
-            gt_boxes = np.concatenate([a['bbox'] for a in gt_annos_part], 0)
-            dt_boxes = np.concatenate([a['bbox'] for a in dt_annos_part], 0)
+            gt_boxes = np.concatenate([a['bbox'] for a in gt_annos_part if len(a['bbox'])!=0], 0)
+            dt_boxes = np.concatenate([a['bbox'] for a in dt_annos_part if len(a['bbox'])!=0], 0)
             overlap_part = image_box_overlap(gt_boxes, dt_boxes)
         elif metric == 1:
             loc = np.concatenate(
@@ -416,7 +418,7 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_parts=50):
     return overlaps, parted_overlaps, total_gt_num, total_dt_num
 
 
-def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
+def _prepare_data(gt_annos, dt_annos, current_class, difficulty, compute_aos):
     gt_datas_list = []
     dt_datas_list = []
     total_dc_num = []
@@ -434,12 +436,23 @@ def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
         total_dc_num.append(dc_bboxes.shape[0])
         dontcares.append(dc_bboxes)
         total_num_valid_gt += num_valid_gt
-        gt_datas = np.concatenate(
-            [gt_annos[i]['bbox'], gt_annos[i]['alpha'][..., np.newaxis]], 1)
-        dt_datas = np.concatenate([
-            dt_annos[i]['bbox'], dt_annos[i]['alpha'][..., np.newaxis],
-            dt_annos[i]['score'][..., np.newaxis]
-        ], 1)
+        dt_datas = np.empty((0,6))
+        if not compute_aos:
+            gt_datas = np.concatenate([
+                gt_annos[i]['bbox'], np.array([-10]*len(gt_annos[i]['bbox']))[..., np.newaxis]], 1)
+            if len(dt_annos[i]['bbox'])!=0:
+                dt_datas = np.concatenate([
+                    dt_annos[i]['bbox'], np.array([-10]*len(dt_annos[i]['bbox']))[..., np.newaxis],
+                    dt_annos[i]['score'][..., np.newaxis]
+                ], 1)
+        else:
+            gt_datas = np.concatenate(
+                [gt_annos[i]['bbox'], gt_annos[i]['alpha'][..., np.newaxis]], 1)
+            if len(dt_annos[i]['bbox'])!=0:
+                dt_datas = np.concatenate([
+                    dt_annos[i]['bbox'], dt_annos[i]['alpha'][..., np.newaxis],
+                    dt_annos[i]['score'][..., np.newaxis]
+                ], 1)
         gt_datas_list.append(gt_datas)
         dt_datas_list.append(dt_datas)
     total_dc_num = np.stack(total_dc_num, axis=0)
@@ -489,7 +502,7 @@ def eval_class(gt_annos,
     aos = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
     for m, current_class in enumerate(current_classes):
         for idx_l, difficulty in enumerate(difficultys):
-            rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty)
+            rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty, compute_aos)
             (gt_datas_list, dt_datas_list, ignored_gts, ignored_dets,
              dontcares, total_dc_num, total_num_valid_gt) = rets
             for k, min_overlap in enumerate(min_overlaps[:, metric, m]):
@@ -590,7 +603,8 @@ def do_eval(gt_annos,
             min_overlaps,
             eval_types=['bbox', 'bev', '3d']):
     # min_overlaps: [num_minoverlap, metric, num_class]
-    difficultys = [0, 1, 2]
+    difficultys = [0]
+    # difficultys = [0, 1, 2]
     mAP_bbox = None
     mAP_aos = None
     if 'bbox' in eval_types:
@@ -706,35 +720,35 @@ def kitti_eval(gt_annos,
                                              eval_types)
 
     ret_dict = {}
-    difficulty = ['easy', 'moderate', 'hard']
+    # difficulty = ['easy', 'moderate', 'hard']
     for j, curcls in enumerate(current_classes):
         # mAP threshold array: [num_minoverlap, metric, class]
         # mAP result: [num_class, num_diff, num_minoverlap]
         curcls_name = class_to_name[curcls]
         for i in range(min_overlaps.shape[0]):
             # prepare results for print
-            result += ('{} AP@{:.2f}, {:.2f}, {:.2f}:\n'.format(
+            result += ('{} AP@{:.2f}:\n'.format(
                 curcls_name, *min_overlaps[i, :, j]))
             if mAPbbox is not None:
-                result += 'bbox AP:{:.4f}, {:.4f}, {:.4f}\n'.format(
+                result += 'bbox AP:{:.4f}\n'.format(
                     *mAPbbox[j, :, i])
             if mAPbev is not None:
-                result += 'bev  AP:{:.4f}, {:.4f}, {:.4f}\n'.format(
+                result += 'bev  AP:{:.4f}\n'.format(
                     *mAPbev[j, :, i])
             if mAP3d is not None:
-                result += '3d   AP:{:.4f}, {:.4f}, {:.4f}\n'.format(
+                result += '3d   AP:{:.4f}\n'.format(
                     *mAP3d[j, :, i])
 
             if compute_aos:
-                result += 'aos  AP:{:.2f}, {:.2f}, {:.2f}\n'.format(
+                result += 'aos  AP:{:.2f}\n'.format(
                     *mAPaos[j, :, i])
 
             # prepare results for logger
-            for idx in range(3):
+            for idx in range(1):
                 if i == 0:
-                    postfix = f'{difficulty[idx]}_strict'
+                    postfix = f'_strict'
                 else:
-                    postfix = f'{difficulty[idx]}_loose'
+                    postfix = f'_loose'
                 prefix = f'KITTI/{curcls_name}'
                 if mAP3d is not None:
                     ret_dict[f'{prefix}_3D_{postfix}'] = mAP3d[j, idx, i]
@@ -746,29 +760,28 @@ def kitti_eval(gt_annos,
     # calculate mAP over all classes if there are multiple classes
     if len(current_classes) > 1:
         # prepare results for print
-        result += ('\nOverall AP@{}, {}, {}:\n'.format(*difficulty))
+        result += ('\nOverall AP\n')
         if mAPbbox is not None:
             mAPbbox = mAPbbox.mean(axis=0)
-            result += 'bbox AP:{:.4f}, {:.4f}, {:.4f}\n'.format(*mAPbbox[:, 0])
+            result += 'bbox AP:{:.4f}\n'.format(*mAPbbox[:, 0])
         if mAPbev is not None:
             mAPbev = mAPbev.mean(axis=0)
-            result += 'bev  AP:{:.4f}, {:.4f}, {:.4f}\n'.format(*mAPbev[:, 0])
+            result += 'bev  AP:{:.4f}\n'.format(*mAPbev[:, 0])
         if mAP3d is not None:
             mAP3d = mAP3d.mean(axis=0)
-            result += '3d   AP:{:.4f}, {:.4f}, {:.4f}\n'.format(*mAP3d[:, 0])
+            result += '3d   AP:{:.4f}\n'.format(*mAP3d[:, 0])
         if compute_aos:
             mAPaos = mAPaos.mean(axis=0)
-            result += 'aos  AP:{:.2f}, {:.2f}, {:.2f}\n'.format(*mAPaos[:, 0])
+            result += 'aos  AP:{:.2f}\n'.format(*mAPaos[:, 0])
 
         # prepare results for logger
-        for idx in range(3):
-            postfix = f'{difficulty[idx]}'
+        for idx in range(1):
             if mAP3d is not None:
-                ret_dict[f'KITTI/Overall_3D_{postfix}'] = mAP3d[idx, 0]
+                ret_dict[f'KITTI/Overall_3D'] = mAP3d[idx, 0]
             if mAPbev is not None:
-                ret_dict[f'KITTI/Overall_BEV_{postfix}'] = mAPbev[idx, 0]
+                ret_dict[f'KITTI/Overall_BEV'] = mAPbev[idx, 0]
             if mAPbbox is not None:
-                ret_dict[f'KITTI/Overall_2D_{postfix}'] = mAPbbox[idx, 0]
+                ret_dict[f'KITTI/Overall_2D'] = mAPbbox[idx, 0]
 
     return result, ret_dict
 

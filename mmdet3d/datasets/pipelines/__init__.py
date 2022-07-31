@@ -10,6 +10,9 @@ from .transforms_3d import (BackgroundPointsFilter, GlobalRotScaleTrans,
                             ObjectSample, PointShuffle, PointsRangeFilter,
                             RandomFlip3D, VoxelBasedPointSampler)
 
+### customize pipeline ###
+from .transforms_3d import PointsRangeFilter2
+
 __all__ = [
     'ObjectSample', 'RandomFlip3D', 'ObjectNoise', 'GlobalRotScaleTrans',
     'PointShuffle', 'ObjectRangeFilter', 'PointsRangeFilter', 'Collect3D',
@@ -17,5 +20,6 @@ __all__ = [
     'DefaultFormatBundle', 'DefaultFormatBundle3D', 'DataBaseSampler',
     'NormalizePointsColor', 'LoadAnnotations3D', 'IndoorPointSample',
     'PointSegClassMapping', 'MultiScaleFlipAug3D', 'LoadPointsFromMultiSweeps',
-    'BackgroundPointsFilter', 'VoxelBasedPointSampler'
+    'BackgroundPointsFilter', 'VoxelBasedPointSampler',
+    'PointsRangeFilter2',
 ]

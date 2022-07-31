@@ -179,6 +179,7 @@ def main():
     else:
         model.CLASSES = dataset.CLASSES
 
+    torch.cuda.reset_max_memory_allocated()
     if not distributed:
         model = MMDataParallel(model, device_ids=[0])
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
@@ -189,7 +190,8 @@ def main():
             broadcast_buffers=False)
         outputs = multi_gpu_test(model, data_loader, args.tmpdir,
                                  args.gpu_collect)
-
+    print(torch.cuda.max_memory_allocated()/1024/1024)
+    
     rank, _ = get_dist_info()
     if rank == 0:
         if args.out:

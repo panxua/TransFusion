@@ -9,7 +9,6 @@ from mmdet.datasets.pipelines import RandomFlip
 from ..registry import OBJECTSAMPLERS
 from .data_augment_utils import noise_per_object_v3_
 
-
 @PIPELINES.register_module()
 class RandomFlip3D(RandomFlip):
     """Flip the points & bbox.
@@ -534,6 +533,47 @@ class PointsRangeFilter(object):
         repr_str += '(point_cloud_range={})'.format(self.pcd_range.tolist())
         return repr_str
 
+@PIPELINES.register_module()
+class PointsRangeFilter2(PointsRangeFilter):
+    """Filter points by the range.
+
+    Args:
+        point_cloud_range (list[float]): Point cloud range.
+    """
+
+    def __init__(self, point_cloud_range, result_coord="Lidar", filter_coord="Camera"):
+        self.pcd_range = np.array(point_cloud_range, dtype=np.float32)
+
+        from ...core.bbox import get_box_type
+        if type(result_coord) == str:
+            _, result_coord = get_box_type(result_coord)
+        if type(filter_coord) == str:
+            _, filter_coord = get_box_type(filter_coord)
+        self.result_coord, self.filter_coord = result_coord, filter_coord
+
+    def __call__(self, input_dict):
+        """Call function to filter points by the range under filter_coord and output results under result_coord.
+
+        Args:
+            input_dict (dict): Result dict from loading pipeline.
+
+        Returns:
+            dict: Results after filtering, 'points' keys are updated \
+                in the result dict.
+        """
+        points = input_dict['points']
+        points = points.convert_to(self.filter_coord)
+        points_mask = points.in_range_3d(self.pcd_range)
+        clean_points = points[points_mask]
+        clean_points = clean_points.convert_to(self.result_coord)
+        input_dict['points'] = clean_points
+        return input_dict
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += '(point_cloud_range={})'.format(self.pcd_range.tolist())
+        return repr_str
 
 @PIPELINES.register_module()
 class ObjectNameFilter(object):

@@ -4,6 +4,13 @@ from mmdet.models.builder import (BACKBONES, DETECTORS, HEADS, LOSSES, NECKS,
                                   ROI_EXTRACTORS, SHARED_HEADS, build)
 from .registry import FUSION_LAYERS, MIDDLE_ENCODERS, VOXEL_ENCODERS
 
+###########################
+### customized from BEV ###
+###########################
+from mmcv.utils import Registry
+# FUSIONMODELS = Registry("fusion_models")
+VTRANSFORMS = Registry("vtransforms")
+FUSERS = Registry("fusers")
 
 def build_backbone(cfg):
     """Build backbone."""
@@ -61,3 +68,9 @@ def build_middle_encoder(cfg):
 def build_fusion_layer(cfg):
     """Build fusion layer."""
     return build(cfg, FUSION_LAYERS)
+
+def build_vtransform(cfg):
+    return VTRANSFORMS.build(cfg)
+
+def build_fuser(cfg):
+    return FUSERS.build(cfg)

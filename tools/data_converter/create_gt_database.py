@@ -167,7 +167,31 @@ def create_groundtruth_database(dataset_class_name,
                     with_label_3d=True,
                     file_client_args=file_client_args)
             ])
-
+    elif dataset_class_name == 'VODDataset':
+        file_client_args = dict(backend='disk')
+        dataset_cfg.update(
+            test_mode=False,
+            split='training',
+            modality=dict(
+                use_radar=True,
+                use_depth=False,
+                use_radar_RCS=True,
+                use_radar_velocity=True,
+                use_camera=with_mask,
+            ),
+            pipeline=[
+                dict(
+                    type='LoadPointsFromFile',
+                    coord_type='LIDAR',
+                    load_dim=7,
+                    use_dim=[0,1,2,3,5],
+                    file_client_args=file_client_args),
+                dict(
+                    type='LoadAnnotations3D',
+                    with_bbox_3d=True,
+                    with_label_3d=True,
+                    file_client_args=file_client_args)
+            ])
     elif dataset_class_name == 'NuScenesDataset':
         dataset_cfg.update(
             use_valid_flag=True,

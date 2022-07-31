@@ -672,7 +672,7 @@ class BaseModel(nn.Module):
 
 @BACKBONES.register_module()
 class DLASeg(BaseModel):
-    def __init__(self, num_layers, heads, head_convs):
+    def __init__(self, num_layers, heads, head_convs, pretrained = None):
         opt = Opt()
         super(DLASeg, self).__init__(
             heads, head_convs, 1, 64 if num_layers == 34 else 128, opt=opt)
@@ -695,6 +695,8 @@ class DLASeg(BaseModel):
             out_channel, channels[self.first_level:self.last_level],
             [2 ** i for i in range(self.last_level - self.first_level)],
             node_type=self.node_type)
+
+        self.init_weights(pretrained)
 
     def init_weights(self, pretrained=None):
         if isinstance(pretrained, str):
