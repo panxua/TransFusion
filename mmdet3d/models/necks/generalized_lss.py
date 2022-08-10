@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import ConvModule
-from mmcv.runner import BaseModule, auto_fp16
+from mmcv.cnn import ConvModule, xavier_init
+from mmcv.runner import auto_fp16
+# from mmcv.runner import BaseModule
 
 from mmdet.models.builder import NECKS
 
@@ -10,7 +11,8 @@ __all__ = ["GeneralizedLSSFPN"]
 
 
 @NECKS.register_module()
-class GeneralizedLSSFPN(BaseModule):
+class GeneralizedLSSFPN(nn.Module):
+    # modified from mmcv.runner.BaseModule (lose args: init_cfg, init_weights, _params_init_info)
     def __init__(
         self,
         in_channels,
@@ -101,3 +103,9 @@ class GeneralizedLSSFPN(BaseModule):
         # build outputs
         outs = [laterals[i] for i in range(used_backbone_levels)]
         return tuple(outs)
+
+    def init_weights(self):
+        """Initialize weights of FPN."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                xavier_init(m, distribution='uniform')

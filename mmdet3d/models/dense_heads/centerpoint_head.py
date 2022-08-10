@@ -1,14 +1,17 @@
 import copy
+import math
 import numpy as np
 import torch
 from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init
 from mmcv.runner import force_fp32
 from torch import nn
 
+from mmdet3d.core.bbox.structures import Box3DMode
 from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
                           xywhr2xyxyr)
 from mmdet3d.models import builder
 from mmdet3d.models.builder import HEADS, build_loss
+from mmdet3d.models.losses.rotated_iou_loss import RotatedIoU3DLoss
 from mmdet3d.models.utils import clip_sigmoid
 from mmdet3d.ops.iou3d.iou3d_utils import nms_gpu
 from mmdet.core import build_bbox_coder, multi_apply
@@ -358,7 +361,7 @@ class CenterHead(nn.Module):
         Given feature map and index, return indexed feature map.
 
         Args:
-            feat (torch.tensor): Feature map with the shape of [B, H*W, 10].
+            feat (torch.tensor): Feature map with the shape of [B, H*W, code_size].
             ind (torch.Tensor): Index of the ground truth boxes with the
                 shape of [B, max_obj].
             mask (torch.Tensor): Mask of the feature map with the shape
@@ -366,7 +369,7 @@ class CenterHead(nn.Module):
 
         Returns:
             torch.Tensor: Feature map after gathering with the shape
-                of [B, max_obj, 10].
+                of [B, max_obj, code_size].
         """
         dim = feat.size(2)
         ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
@@ -436,12 +439,26 @@ class CenterHead(nn.Module):
         gt_bboxes_3d = torch.cat(
             (gt_bboxes_3d.gravity_center, gt_bboxes_3d.tensor[:, 3:]),
             dim=1).to(device)
-        max_objs = self.train_cfg['max_objs'] * self.train_cfg['dense_reg']
-        grid_size = torch.tensor(self.train_cfg['grid_size'])
-        pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
-        voxel_size = torch.tensor(self.train_cfg['voxel_size'])
+        if self.train_cfg:
+            max_objs = self.train_cfg['max_objs'] * self.train_cfg['dense_reg']
+            grid_size = torch.tensor(self.train_cfg['grid_size'])
+            pc_range = torch.tensor(self.train_cfg['point_cloud_range'])
+            voxel_size = torch.tensor(self.train_cfg['voxel_size'])
+            out_size_factor = self.train_cfg['out_size_factor']
+            feature_map_size = grid_size[:2] // out_size_factor
+            gaussian_overlap = self.train_cfg['gaussian_overlap']
+            min_radius = self.train_cfg['min_radius']
 
-        feature_map_size = grid_size[:2] // self.train_cfg['out_size_factor']
+        else:
+            print("!!!  --warning: debug code exists--  !!!")
+            max_objs = 300
+            grid_size = np.array([512, 512, 40])
+            pc_range = np.array([0.0, -25.6, -3.0, 51.2, 25.6, 2.0])
+            voxel_size = np.array(([0.1, 0.1, 0.15]))
+            out_size_factor = 8
+            feature_map_size = grid_size[:2] // 8
+            gaussian_overlap = 0.1
+            min_radius = 2
 
         # reorganize the gt_dict by tasks
         task_masks = []
@@ -474,7 +491,7 @@ class CenterHead(nn.Module):
                 (len(self.class_names[idx]), feature_map_size[1],
                  feature_map_size[0]))
 
-            anno_box = gt_bboxes_3d.new_zeros((max_objs, 10),
+            anno_box = gt_bboxes_3d.new_zeros((max_objs, self.bbox_coder.code_size),
                                               dtype=torch.float32)
 
             ind = gt_labels_3d.new_zeros((max_objs), dtype=torch.int64)
@@ -487,16 +504,14 @@ class CenterHead(nn.Module):
 
                 width = task_boxes[idx][k][3]
                 length = task_boxes[idx][k][4]
-                width = width / voxel_size[0] / self.train_cfg[
-                    'out_size_factor']
-                length = length / voxel_size[1] / self.train_cfg[
-                    'out_size_factor']
+                width = width / voxel_size[0] / out_size_factor
+                length = length / voxel_size[1] / out_size_factor
 
                 if width > 0 and length > 0:
                     radius = gaussian_radius(
                         (length, width),
-                        min_overlap=self.train_cfg['gaussian_overlap'])
-                    radius = max(self.train_cfg['min_radius'], int(radius))
+                        min_overlap=gaussian_overlap)
+                    radius = max(min_radius, int(radius))
 
                     # be really careful for the coordinate system of
                     # your box annotation.
@@ -505,10 +520,10 @@ class CenterHead(nn.Module):
 
                     coor_x = (
                         x - pc_range[0]
-                    ) / voxel_size[0] / self.train_cfg['out_size_factor']
+                    ) / voxel_size[0] / out_size_factor
                     coor_y = (
                         y - pc_range[1]
-                    ) / voxel_size[1] / self.train_cfg['out_size_factor']
+                    ) / voxel_size[1] / out_size_factor
 
                     center = torch.tensor([coor_x, coor_y],
                                           dtype=torch.float32,
@@ -532,19 +547,27 @@ class CenterHead(nn.Module):
                     ind[new_idx] = y * feature_map_size[0] + x
                     mask[new_idx] = 1
                     # TODO: support other outdoor dataset
-                    vx, vy = task_boxes[idx][k][7:]
                     rot = task_boxes[idx][k][6]
                     box_dim = task_boxes[idx][k][3:6]
                     if self.norm_bbox:
                         box_dim = box_dim.log()
-                    anno_box[new_idx] = torch.cat([
-                        center - torch.tensor([x, y], device=device),
-                        z.unsqueeze(0), box_dim,
-                        torch.sin(rot).unsqueeze(0),
-                        torch.cos(rot).unsqueeze(0),
-                        vx.unsqueeze(0),
-                        vy.unsqueeze(0)
-                    ])
+                    if self.bbox_coder.code_size > 8:
+                        vx, vy = task_boxes[idx][k][7:]
+                        anno_box[new_idx] = torch.cat([
+                            center - torch.tensor([x, y], device=device),
+                            z.unsqueeze(0), box_dim,
+                            torch.sin(rot).unsqueeze(0),
+                            torch.cos(rot).unsqueeze(0),
+                            vx.unsqueeze(0),
+                            vy.unsqueeze(0)
+                        ])
+                    else:
+                        anno_box[new_idx] = torch.cat([
+                            center - torch.tensor([x, y], device=device),
+                            z.unsqueeze(0), box_dim,
+                            torch.sin(rot).unsqueeze(0),
+                            torch.cos(rot).unsqueeze(0),
+                        ])
 
             heatmaps.append(heatmap)
             anno_boxes.append(anno_box)
@@ -553,7 +576,7 @@ class CenterHead(nn.Module):
         return heatmaps, anno_boxes, inds, masks
 
     @force_fp32(apply_to=('preds_dicts'))
-    def loss(self, gt_bboxes_3d, gt_labels_3d, preds_dicts, **kwargs):
+    def loss(self, gt_bboxes_3d, gt_labels_3d, preds_dicts, img_metas, **kwargs):
         """Loss function for CenterHead.
 
         Args:
@@ -577,11 +600,18 @@ class CenterHead(nn.Module):
                 heatmaps[task_id],
                 avg_factor=max(num_pos, 1))
             target_box = anno_boxes[task_id]
+
             # reconstruct the anno_box from multiple reg heads
-            preds_dict[0]['anno_box'] = torch.cat(
-                (preds_dict[0]['reg'], preds_dict[0]['height'],
-                 preds_dict[0]['dim'], preds_dict[0]['rot'],
-                 preds_dict[0]['vel']),
+            if self.bbox_coder.code_size > 8:
+                preds_dict[0]['anno_box'] = torch.cat(
+                    (preds_dict[0]['reg'], preds_dict[0]['height'],
+                    preds_dict[0]['dim'], preds_dict[0]['rot'],
+                    preds_dict[0]['vel']),
+                dim=1)
+            else:
+                preds_dict[0]['anno_box'] = torch.cat(
+                    (preds_dict[0]['reg'], preds_dict[0]['height'],
+                    preds_dict[0]['dim'], preds_dict[0]['rot']),
                 dim=1)
 
             # Regression loss for dimension, offset, height, rotation
@@ -593,11 +623,57 @@ class CenterHead(nn.Module):
             mask = masks[task_id].unsqueeze(2).expand_as(target_box).float()
             isnotnan = (~torch.isnan(target_box)).float()
             mask *= isnotnan
-
             code_weights = self.train_cfg.get('code_weights', None)
             bbox_weights = mask * mask.new_tensor(code_weights)
+            #TODO: check
+            if isinstance(self.loss_bbox, RotatedIoU3DLoss):
+                '''
+                preds B, reg, height, dim, rot -> B, xyz wlh, alpha(camera)
+                '''
+                height, width = heatmaps[task_id].shape[-2:]
+                xs = ind % width + pred[:,:,0] # reg_x 0
+                ys = ind // width + pred[:,:,1] # reg_y 1
+                lidar_xs = (xs*self.train_cfg['out_size_factor']*self.train_cfg['voxel_size'][0] + self.train_cfg['point_cloud_range'][0]).unsqueeze(-1)
+                lidar_ys = (ys*self.train_cfg['out_size_factor']*self.train_cfg['voxel_size'][1] + self.train_cfg['point_cloud_range'][1]).unsqueeze(-1)
+                lidar_zs = pred[:,:,2,None] # z 2
+                lidar_coor = torch.stack([lidar_xs,lidar_ys,lidar_zs,torch.ones(lidar_xs.shape).to(lidar_xs.device)], dim=2)
+                lidar2cam = torch.Tensor([img_meta['lidar2cam'][0] for img_meta in img_metas]).to(lidar_coor.device)
+                B, N = lidar_coor.shape[:2]
+                #TODO: check
+                cam_coor = (lidar2cam.unsqueeze(1).repeat([1,N,1,1])@lidar_coor)[:,:,:3,-1]
+                l, w, h = pred[:,:,3,None], pred[:,:,4,None], pred[:,:,5,None] # x_dim 3, y_dim 4, z_dim 5
+                rot = torch.atan2(pred[:,:,6],pred[:,:,7]) # rots 6, rotc 7
+                alpha = torch.atan2(cam_coor[:,:,2], cam_coor[:,:,0]) + rot + math.pi*1.5 # arctan2(z,x)
+
+                temp_ind = alpha % (math.pi*2)==0
+                alpha[(mask[:,:,0]!=0) & temp_ind] += math.pi*2 # if divide
+                alpha[(mask[:,:,0]!=0) & ~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
+                alpha = alpha.unsqueeze(-1)
+                assert torch.all(-math.pi < alpha[(mask[:,:,0]!=0)]) and torch.all(alpha[(mask[:,:,0]!=0)] < math.pi), "bug"
+
+                pred = torch.cat([cam_coor, w, l, h, alpha], dim=2) * mask[:,:,:7]
+
+                ''' 
+                gt_bboxes_3d lidar(x,y,z), dim, rotate -> camera(x,y,z), wlh, alpha
+                '''
+                target_box = torch.Tensor(*pred.shape).to(pred.device)
+                for batch_idx, bbox in enumerate(gt_bboxes_3d):
+                    cam_bboxes = bbox.convert_to(Box3DMode.CAM, img_metas[batch_idx]['lidar2cam'][0]).tensor
+                    cam_bboxes[:,3], cam_bboxes[:,4], cam_bboxes[:,5] = cam_bboxes[:,4], cam_bboxes[:,3], cam_bboxes[:,5]
+
+                    alpha = torch.atan2(cam_bboxes[:,2], cam_bboxes[:,0]) + cam_bboxes[:,6] + math.pi*1.5
+                    temp_ind = alpha % (math.pi*2)==0
+                    alpha[temp_ind] += math.pi*2 # if divide
+                    alpha[~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
+                    cam_bboxes[:,6] = alpha
+                    assert torch.all(-math.pi < alpha) and torch.all(alpha < math.pi), "bug"
+
+                    target_box[batch_idx, :cam_bboxes.shape[0]] = cam_bboxes
+
             loss_bbox = self.loss_bbox(
                 pred, target_box, bbox_weights, avg_factor=(num + 1e-4))
+            assert not torch.isnan(loss_bbox), "nan loss"
+            assert not torch.isnan(loss_heatmap), "nan loss"
             loss_dict[f'task{task_id}.loss_heatmap'] = loss_heatmap
             loss_dict[f'task{task_id}.loss_bbox'] = loss_bbox
         return loss_dict
@@ -642,7 +718,11 @@ class CenterHead(nn.Module):
                 batch_vel,
                 reg=batch_reg,
                 task_id=task_id)
-            assert self.test_cfg['nms_type'] in ['circle', 'rotate']
+            nms_type = self.test_cfg.get('nms_type')
+            if isinstance(nms_type,list):
+                nms_type = nms_type[task_id]
+            assert nms_type in ['circle', 'rotate']
+
             batch_reg_preds = [box['bboxes'] for box in temp]
             batch_cls_preds = [box['scores'] for box in temp]
             batch_cls_labels = [box['labels'] for box in temp]
@@ -672,7 +752,7 @@ class CenterHead(nn.Module):
                 rets.append(
                     self.get_task_detections(num_class_with_bg,
                                              batch_cls_preds, batch_reg_preds,
-                                             batch_cls_labels, img_metas))
+                                             batch_cls_labels, img_metas, task_id))
 
         # Merge branches results
         num_samples = len(rets[0])
@@ -684,7 +764,7 @@ class CenterHead(nn.Module):
                     bboxes = torch.cat([ret[i][k] for ret in rets])
                     bboxes[:, 2] = bboxes[:, 2] - bboxes[:, 5] * 0.5
                     bboxes = img_metas[i]['box_type_3d'](
-                        bboxes, self.bbox_coder.code_size)
+                        bboxes, 7)
                 elif k == 'scores':
                     scores = torch.cat([ret[i][k] for ret in rets])
                 elif k == 'labels':
@@ -697,9 +777,8 @@ class CenterHead(nn.Module):
         return ret_list
 
     def get_task_detections(self, num_class_with_bg, batch_cls_preds,
-                            batch_reg_preds, batch_cls_labels, img_metas):
+                            batch_reg_preds, batch_cls_labels, img_metas, task_id):
         """Rotate nms for each task.
-
         Args:
             num_class_with_bg (int): Number of classes for the current task.
             batch_cls_preds (list[torch.Tensor]): Prediction score with the
@@ -709,10 +788,8 @@ class CenterHead(nn.Module):
             batch_cls_labels (list[torch.Tensor]): Prediction label with the
                 shape of [N].
             img_metas (list[dict]): Meta information of each sample.
-
         Returns:
             list[dict[str: torch.Tensor]]: contains the following keys:
-
                 -bboxes (torch.Tensor): Prediction bboxes after nms with the \
                     shape of [N, 9].
                 -scores (torch.Tensor): Prediction scores after nms with the \
@@ -731,12 +808,19 @@ class CenterHead(nn.Module):
         for i, (box_preds, cls_preds, cls_labels) in enumerate(
                 zip(batch_reg_preds, batch_cls_preds, batch_cls_labels)):
 
+            nms_rescale_factor = self.test_cfg.get('nms_rescale_factor', [1.0 for _ in range(len(self.task_heads))])[task_id]
+            if isinstance(nms_rescale_factor,list):
+                for cid in range(len(nms_rescale_factor)):
+                    box_preds[cls_labels==cid, 3:6] = box_preds[cls_labels==cid, 3:6] * nms_rescale_factor[cid]
+            else:
+                box_preds[:,3:6] = box_preds[:,3:6] * nms_rescale_factor
+
             # Apply NMS in birdeye view
 
             # get highest score per prediction, than apply nms
             # to remove overlapped box.
             if num_class_with_bg == 1:
-                top_scores = cls_preds.squeeze(-1)
+                top_scores = cls_preds.view(-1,1).squeeze(-1)
                 top_labels = torch.zeros(
                     cls_preds.shape[0],
                     device=cls_preds.device,
@@ -744,7 +828,7 @@ class CenterHead(nn.Module):
 
             else:
                 top_labels = cls_labels.long()
-                top_scores = cls_preds.squeeze(-1)
+                top_scores = cls_preds.view(-1,1).squeeze(-1)
 
             if self.test_cfg['score_threshold'] > 0.0:
                 thresh = torch.tensor(
@@ -759,17 +843,26 @@ class CenterHead(nn.Module):
                     top_labels = top_labels[top_scores_keep]
 
                 boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](
-                    box_preds[:, :], self.bbox_coder.code_size).bev)
+                    box_preds[:, :], 7).bev)
                 # the nms in 3d detection just remove overlap boxes.
-
+                if isinstance(self.test_cfg['nms_thr'],list):
+                    nms_thresh = self.test_cfg['nms_thr'][task_id]
+                else:
+                    nms_thresh = self.test_cfg['nms_thr']
                 selected = nms_gpu(
                     boxes_for_nms,
                     top_scores,
-                    thresh=self.test_cfg['nms_thr'],
+                    thresh=nms_thresh,
                     pre_maxsize=self.test_cfg['pre_max_size'],
                     post_max_size=self.test_cfg['post_max_size'])
             else:
                 selected = []
+
+            if isinstance(nms_rescale_factor, list):
+                for cid in range(len(nms_rescale_factor)):
+                    box_preds[top_labels == cid, 3:6] = box_preds[top_labels == cid, 3:6] / nms_rescale_factor[cid]
+            else:
+                box_preds[:, 3:6] = box_preds[:, 3:6] / nms_rescale_factor
 
             # if selected is not None:
             selected_boxes = box_preds[selected]
@@ -802,7 +895,7 @@ class CenterHead(nn.Module):
                 dtype = batch_reg_preds[0].dtype
                 device = batch_reg_preds[0].device
                 predictions_dict = dict(
-                    bboxes=torch.zeros([0, self.bbox_coder.code_size],
+                    bboxes=torch.zeros([0, self.bbox_coder.code_size-1],
                                        dtype=dtype,
                                        device=device),
                     scores=torch.zeros([0], dtype=dtype, device=device),

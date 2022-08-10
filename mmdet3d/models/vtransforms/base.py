@@ -1,8 +1,9 @@
+from cmath import rect
 from typing import Tuple
 
 import torch
 from mmcv.runner import force_fp32
-from torch import nn
+from torch import nn, squeeze
 
 from mmdet3d.ops import bev_pool
 
@@ -40,9 +41,9 @@ class BaseTransform(nn.Module):
         self.dbound = dbound
 
         dx, bx, nx = gen_dx_bx(self.xbound, self.ybound, self.zbound)
-        self.dx = nn.Parameter(dx, requires_grad=False)
-        self.bx = nn.Parameter(bx, requires_grad=False)
-        self.nx = nn.Parameter(nx, requires_grad=False)
+        self.dx = nn.Parameter(dx, requires_grad=False).cuda()
+        self.bx = nn.Parameter(bx, requires_grad=False).cuda()
+        self.nx = nn.Parameter(nx, requires_grad=False).cuda()
 
         self.C = out_channels
         self.frustum = self.create_frustum()
@@ -73,7 +74,7 @@ class BaseTransform(nn.Module):
         )
 
         frustum = torch.stack((xs, ys, ds), -1)
-        return nn.Parameter(frustum, requires_grad=False)
+        return nn.Parameter(frustum, requires_grad=False).cuda()
 
     @force_fp32()
     def get_geometry(
@@ -104,6 +105,11 @@ class BaseTransform(nn.Module):
             ),
             5,
         )
+        if intrins.shape[-1]==4: #for kitti
+            rect_trans = intrins[..., :3, 3]
+            intrins = intrins[..., :3, :3]
+            assert all(rect_trans[...,-1]== 0), "LSS will has a problem"
+            points -= rect_trans.view(B,N,1,1,1,3,1)
         combine = rots.matmul(torch.inverse(intrins))
         points = combine.view(B, N, 1, 1, 1, 3, 3).matmul(points).squeeze(-1)
         points += trans.view(B, N, 1, 1, 1, 3)
@@ -142,6 +148,10 @@ class BaseTransform(nn.Module):
         x = x.reshape(Nprime, C)
 
         # flatten indices
+        # bx: bound[2]
+        # dx: bound[0]+bound[2]/2
+        # nx: bound[1]-bound[0]/bound[2]
+        # bx-dx/2: bound[2] - bound[0]/2 - bound[2]/4
         geom_feats = ((geom_feats - (self.bx - self.dx / 2.0)) / self.dx).long()
         geom_feats = geom_feats.view(Nprime, 3)
         batch_ix = torch.cat(
@@ -176,7 +186,7 @@ class BaseTransform(nn.Module):
         self,
         img,
         points,
-        camera2ego,
+        sensor2ego,
         lidar2ego,
         lidar2camera,
         lidar2image,
@@ -186,30 +196,51 @@ class BaseTransform(nn.Module):
         metas=None,
         **kwargs,
     ):
-        rots = camera2ego[..., :3, :3]
-        trans = camera2ego[..., :3, 3]
-        intrins = camera_intrinsics[..., :3, :3]
+        # TODO: need to be move to init/re-init; should not be called repeatedly
+        if 'img_shape' in metas[0].keys() and metas[0]['img_shape'][:2] != self.image_size:
+            self.image_size = metas[0]['img_shape'][:2]
+            from math import ceil
+            self.feature_size = (ceil(self.image_size[0]/8),ceil(self.image_size[1]/8))
+            # if 'pad_shape' in metas[0].keys() and metas[0]['pad_shape'] != self.image_size:
+            #     temp, self.image_size = self.image_size, metas[0]['pad_shape'][:2] 
+            #     self.frustum = self.create_frustum()
+            #     self.image_size = temp
+            # else:
+            self.frustum = self.create_frustum()
+        
+        # (ul,vl,l) = intrinsic@ego2sensor@lidar2ego@(C|1)
+        # (rots @ (intrin-1 @ (ul,vl,l) + trans = (lidar_rot | lidar_trans)(c|1)  
+        B,N,_,_ = lidar2image.shape
+        assert N==1, "Not support yet for multi-view"
+        if sensor2ego:
+            rots = sensor2ego[..., :3, :3]
+            trans = sensor2ego[..., :3, 3]
+        else:
+            rots = torch.eye(3).expand(B,N,3,3).to(img.device)
+            trans = torch.zeros(3).expand(B,N,3).to(img.device)
+    
         post_rots = img_aug_matrix[..., :3, :3]
         post_trans = img_aug_matrix[..., :3, 3]
-        lidar2ego_rots = lidar2ego[..., :3, :3]
-        lidar2ego_trans = lidar2ego[..., :3, 3]
+        lidar2cam_rot = lidar2camera[..., :3, :3]
+        lidar2cam_trans = lidar2camera[..., :3, 3]
         extra_rots = lidar_aug_matrix[..., :3, :3]
         extra_trans = lidar_aug_matrix[..., :3, 3]
 
         geom = self.get_geometry(
             rots,
             trans,
-            intrins,
+            camera_intrinsics,
             post_rots,
             post_trans,
-            lidar2ego_rots,
-            lidar2ego_trans,
+            lidar2cam_rot,
+            lidar2cam_trans,
             extra_rots=extra_rots,
             extra_trans=extra_trans
         )
 
         x = self.get_cam_feats(img)
-        x = self.bev_pool(geom, x)
+        fw, fh, _ = geom.shape[-3:]
+        x = self.bev_pool(geom, x[...,:fw,:fh,:])
         return x
 
 
@@ -229,18 +260,40 @@ class BaseDepthTransform(BaseTransform):
         metas,
         **kwargs,
     ):
-        rots = sensor2ego[..., :3, :3]
-        trans = sensor2ego[..., :3, 3]
-        intrins = cam_intrinsic[..., :3, :3]
+        # if any([meta['sample_idx']==3539 for meta in metas]):
+        #     print()
+        # TODO: need to be move to init/re-init; should not be called repeatedly
+        if 'img_shape' in metas[0].keys() and metas[0]['img_shape'][:2] != self.image_size:
+            self.image_size = metas[0]['img_shape'][:2]
+            from math import ceil
+            self.feature_size = (ceil(self.image_size[0]/8),ceil(self.image_size[1]/8))
+            # if 'pad_shape' in metas[0].keys() and metas[0]['pad_shape'] != self.image_size:
+            #     temp, self.image_size = self.image_size, metas[0]['pad_shape'][:2] 
+            #     self.frustum = self.create_frustum()
+            #     self.image_size = temp
+            # else:
+            self.frustum = self.create_frustum()
+        
+        # (ul,vl,l) = intrinsic@ego2sensor@lidar2ego@(C|1)
+        # (rots @ (intrin-1 @ (ul,vl,l) + trans = (lidar_rot | lidar_trans)(c|1)  
+        B,N,_,_ = lidar2image.shape
+        assert N==1, "Not support yet for multi-view"
+        if sensor2ego:
+            rots = sensor2ego[..., :3, :3]
+            trans = sensor2ego[..., :3, 3]
+        else:
+            rots = torch.eye(3).expand(B,N,3,3).to(img.device)
+            trans = torch.zeros(3).expand(B,N,3).to(img.device)
+    
         post_rots = img_aug_matrix[..., :3, :3]
         post_trans = img_aug_matrix[..., :3, 3]
-        lidar2ego_rots = lidar2ego[..., :3, :3]
-        lidar2ego_trans = lidar2ego[..., :3, 3]
+        lidar2cam_rot = lidar2camera[..., :3, :3]
+        lidar2cam_trans = lidar2camera[..., :3, 3]
         extra_rots = lidar_aug_matrix[..., :3, :3]
         extra_trans = lidar_aug_matrix[..., :3, 3]
 
-        batch_size = len(points)
-        depth = torch.zeros(batch_size, 6, 1, *self.image_size).to(points[0].device)
+        batch_size, num_views, _, _ = lidar2camera.shape
+        depth = torch.zeros(batch_size, num_views, 1, *self.image_size).to(points[0].device)
 
         for b in range(batch_size):
             cur_coords = points[b][:, :3].transpose(1, 0)
@@ -270,19 +323,24 @@ class BaseDepthTransform(BaseTransform):
                 & (cur_coords[..., 1] < self.image_size[1])
                 & (cur_coords[..., 1] >= 0)
             )
-            for c in range(6):
+
+            # TODO: substitude with radar depth
+            for c in range(num_views):
                 masked_coords = cur_coords[c, on_img[c]].long()
                 masked_dist = dist[c, on_img[c]]
                 depth[b, c, 0, masked_coords[:, 0], masked_coords[:, 1]] = masked_dist
 
-        geom = self.get_geometry(
+        #TODO generalized
+        geom = self.get_geometry( #modified for kitti
             rots,
             trans,
-            intrins,
+            cam_intrinsic,
             post_rots,
             post_trans,
-            lidar2ego_rots,
-            lidar2ego_trans,
+            lidar2cam_rot,
+            lidar2cam_trans,
+            extra_rots=extra_rots,
+            extra_trans=extra_trans
         )
 
         x = self.get_cam_feats(img, depth)

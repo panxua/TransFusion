@@ -9,6 +9,7 @@ from os import path as osp
 from mmdet.datasets import DATASETS
 from ..core.bbox import Box3DMode, points_cam2img
 from .kitti_dataset import KittiDataset
+from ..core.visualizer import show_result_offline
 
 
 @DATASETS.register_module()
@@ -127,10 +128,13 @@ class VODDataset(KittiDataset):
         P0 = info['calib']['P0'].astype(np.float32)
         lidar2img = P0 @ rect @ Trv2c
 
+        # raise NotImplementedError
         # the Tr_velo_to_cam is computed for all images but not saved in .info for img1-4
         # the size of img0-2: 1280x1920; img3-4: 886x1920
         if self.modality['use_camera']:
             image_paths = []
+            intrins_list = []
+            lidar2camera_rts = []
             lidar2img_rts = []
 
             # load calibration for the only 1 images.
@@ -139,10 +143,18 @@ class VODDataset(KittiDataset):
 
             # assert np.allclose(Tr_velo_to_cam_list[0], info['calib']['Tr_velo_to_cam'].astype(np.float32))
             P2 = info['calib']['P2'].astype(np.float32)
+            intrins = P2
+            lidar2cam = rect @ Trv2c
             lidar2img = P2 @ rect @ Trv2c
 
+            # rect ref_cam2cam_x
+            # Trv2c lidarVelodyne2ref_cam
+            # P2 cam_x2img
+
             image_paths.append(img_filename)
+            intrins_list.append(intrins)
             lidar2img_rts.append(lidar2img)
+            lidar2camera_rts.append(lidar2cam)
 
         pts_filename = self._get_pts_filename(sample_idx)
         input_dict = dict(
@@ -150,9 +162,14 @@ class VODDataset(KittiDataset):
             pts_filename=pts_filename,
             img_prefix=None,
         )
+
         if self.modality['use_camera']:
             input_dict['img_filename'] = image_paths
+            input_dict['intrins'] = intrins_list
             input_dict['lidar2img'] = lidar2img_rts
+            input_dict['lidar2cam'] = lidar2camera_rts
+            # input_dict['camera2ego'] = []
+            # input_dict['camera_intrinsics'] = []
 
         if not self.test_mode:
             annos = self.get_ann_info(index)
@@ -212,33 +229,33 @@ class VODDataset(KittiDataset):
             result_files = self.bbox2result_kitti(outputs, self.CLASSES,
                                                   pklfile_prefix,
                                                   submission_prefix)
-        if 'VOD' in data_format:
-            from ..core.evaluation.VOD_utils.prediction_kitti_to_VOD import \
-                KITTI2VOD  # noqa
-            VOD_root = osp.join(
-                self.data_root.split('kitti_format')[0], 'VOD_format')
-            if self.split == 'training':
-                VOD_tfrecords_dir = osp.join(VOD_root, 'validation')
-                prefix = '1'
-            elif self.split == 'testing':
-                VOD_tfrecords_dir = osp.join(VOD_root, 'testing')
-                prefix = '2'
-            else:
-                raise ValueError('Not supported split value.')
-            save_tmp_dir = tempfile.TemporaryDirectory()
-            VOD_results_save_dir = save_tmp_dir.name
-            VOD_results_final_path = f'{pklfile_prefix}.bin'
-            if 'pts_bbox' in result_files:
-                converter = KITTI2VOD(result_files['pts_bbox'],
-                                        VOD_tfrecords_dir,
-                                        VOD_results_save_dir,
-                                        VOD_results_final_path, prefix)
-            else:
-                converter = KITTI2VOD(result_files, VOD_tfrecords_dir,
-                                        VOD_results_save_dir,
-                                        VOD_results_final_path, prefix)
-            converter.convert()
-            save_tmp_dir.cleanup()
+        # if 'VOD' in data_format:
+        #     from ..core.evaluation.vod_utils.prediction_kitti_to_VOD import \
+        #         KITTI2VOD  # noqa
+        #     VOD_root = osp.join(
+        #         self.data_root.split('kitti_format')[0], 'VOD_format')
+        #     if self.split == 'training':
+        #         VOD_tfrecords_dir = osp.join(VOD_root, 'validation')
+        #         prefix = '1'
+        #     elif self.split == 'testing':
+        #         VOD_tfrecords_dir = osp.join(VOD_root, 'testing')
+        #         prefix = '2'
+        #     else:
+        #         raise ValueError('Not supported split value.')
+        #     save_tmp_dir = tempfile.TemporaryDirectory()
+        #     VOD_results_save_dir = save_tmp_dir.name
+        #     VOD_results_final_path = f'{pklfile_prefix}.bin'
+        #     if 'pts_bbox' in result_files:
+        #         converter = KITTI2VOD(result_files['pts_bbox'],
+        #                                 VOD_tfrecords_dir,
+        #                                 VOD_results_save_dir,
+        #                                 VOD_results_final_path, prefix)
+        #     else:
+        #         converter = KITTI2VOD(result_files, VOD_tfrecords_dir,
+        #                                 VOD_results_save_dir,
+        #                                 VOD_results_final_path, prefix)
+        #     converter.convert()
+        #     save_tmp_dir.cleanup()
 
         return result_files, tmp_dir
 
@@ -288,6 +305,7 @@ class VODDataset(KittiDataset):
             if isinstance(result_files, dict):
                 dt_annos = result_files['pts_bbox']
             eval_results = evaluate(gt_annos,dt_annos)
+            # show_result_offline(gt_annos,dt_annos)
             print_log("Results: \n"
                 f"Entire annotated area: \n"
                 f"Car: {eval_results['entire_area']['Car_3d_all']} \n"

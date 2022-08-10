@@ -691,7 +691,7 @@ class KittiDataset(Custom3DDataset):
             gt_bboxes = self.get_ann_info(i)['gt_bboxes_3d'].tensor
             gt_bboxes = Box3DMode.convert(gt_bboxes, Box3DMode.LIDAR,
                                           Box3DMode.DEPTH)
-            pred_bboxes = result['boxes_3d'].tensor.numpy()
+            pred_bboxes = result['pts_bbox']['boxes_3d'].tensor.numpy()
             pred_bboxes = Box3DMode.convert(pred_bboxes, Box3DMode.LIDAR,
                                             Box3DMode.DEPTH)
             show_result(points, gt_bboxes, pred_bboxes, out_dir, file_name,

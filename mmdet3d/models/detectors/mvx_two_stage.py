@@ -364,8 +364,8 @@ class MVXTwoStageDetector(Base3DDetector):
         # RPN forward and loss
         if self.with_img_rpn:
             rpn_outs = self.img_rpn_head(x)
-            rpn_loss_inputs = rpn_outs + (gt_bboxes, img_metas,
-                                          self.train_cfg.img_rpn)
+            rpn_loss_inputs = rpn_outs + (gt_bboxes, img_metas)
+                                          #,self.train_cfg.img_rpn)
             rpn_losses = self.img_rpn_head.loss(
                 *rpn_loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
             losses.update(rpn_losses)

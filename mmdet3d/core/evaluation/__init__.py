@@ -6,5 +6,5 @@ from .seg_eval import seg_eval
 
 __all__ = [
     'kitti_eval_coco_style', 'kitti_eval', 'indoor_eval', 'lyft_eval',
-    'seg_eval'
+    'seg_eval', "evaluate"
 ]

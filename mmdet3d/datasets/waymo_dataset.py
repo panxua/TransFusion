@@ -119,6 +119,7 @@ class WaymoDataset(KittiDataset):
         P0 = info['calib']['P0'].astype(np.float32)
         lidar2img = P0 @ rect @ Trv2c
 
+        raise NotImplementedError
         # the Tr_velo_to_cam is computed for all images but not saved in .info for img1-4
         # the size of img0-2: 1280x1920; img3-4: 886x1920
         if self.modality['use_camera']:

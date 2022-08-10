@@ -86,6 +86,11 @@ class DepthLSSTransform(BaseDepthTransform):
         x = x.view(B * N, C, fH, fW)
 
         d = self.dtransform(d)
+        
+        # TODO: check the cropping pad
+        _, _, fH, fW =d.shape
+        x = x[...,:fH,:fW]
+
         x = torch.cat([d, x], dim=1)
         x = self.depthnet(x)
 

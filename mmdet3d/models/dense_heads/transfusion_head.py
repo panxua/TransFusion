@@ -594,6 +594,8 @@ class TransFusionHead(nn.Module):
     def __init__(self,
                  fuse_img=False,
                  fuse_img_decoder=True,
+                 fuse_bev=False,
+                 fuse_bev_collapse=True,
                  num_views=0,
                  in_channels_img=64,
                  out_size_factor_img=4,
@@ -712,9 +714,9 @@ class TransFusionHead(nn.Module):
             self.prediction_heads.append(FFN(hidden_channel, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
 
         self.fuse_img = fuse_img
-        self.fuse_img_decoder = False
-        if self.fuse_img:
-            self.fuse_img_decoder=fuse_img_decoder
+        self.fuse_img_decoder = self.fuse_img and fuse_img_decoder
+        self.fuse_bev = self.fuse_img and fuse_bev
+        self.fuse_bev_collapse = self.fuse_bev and fuse_bev_collapse
 
         if self.fuse_img:
             self.num_views = num_views
@@ -750,7 +752,11 @@ class TransFusionHead(nn.Module):
                         cross_posembed=PositionEmbeddingLearned(2, hidden_channel),
                         cross_only=True,
                     ))
-            self.fc = nn.Sequential(*[nn.Conv1d(hidden_channel, hidden_channel, kernel_size=1)])
+            if not self.fuse_bev or self.fuse_bev_collapse:       
+                self.fc = nn.Sequential(*[nn.Conv1d(hidden_channel, hidden_channel, kernel_size=1)])
+            else:
+                self.conv = nn.Sequential(*[nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1),
+                                            nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1)])
 
         self.init_weights()
         self._init_assigner_sampler()
@@ -762,6 +768,7 @@ class TransFusionHead(nn.Module):
 
         self.img_feat_pos = None
         self.img_feat_collapsed_pos = None
+        self.img_feat_shrink_pos = None
 
     def create_2D_grid(self, x_size, y_size):
         meshgrid = [[0, x_size - 1, x_size], [0, y_size - 1, y_size]]
@@ -814,7 +821,8 @@ class TransFusionHead(nn.Module):
         """
         batch_size = inputs.shape[0]
         lidar_feat = self.shared_conv(inputs)
-
+        # if any([meta['sample_idx']==3539 for meta in img_metas]):
+        #     print()
         #################################
         # image to BEV
         #################################
@@ -827,19 +835,31 @@ class TransFusionHead(nn.Module):
             img_h, img_w, num_channel = img_inputs.shape[-2], img_inputs.shape[-1], img_feat.shape[1]
             raw_img_feat = img_feat.view(batch_size, self.num_views, num_channel, img_h, img_w).permute(0, 2, 3, 1, 4) # [BS, C, H, n_views, W]
             img_feat = raw_img_feat.reshape(batch_size, num_channel, img_h, img_w * self.num_views)  # [BS, C, H, n_views*W]
-            img_feat_collapsed = img_feat.max(2).values
-            img_feat_collapsed = self.fc(img_feat_collapsed).view(batch_size, num_channel, img_w * self.num_views)
+            if not self.fuse_bev or self.fuse_bev_collapse:
+                img_feat_collapsed = img_feat.max(2).values
+                img_feat_collapsed = self.fc(img_feat_collapsed).view(batch_size, num_channel, img_w * self.num_views)
 
-            # positional encoding for image guided query initialization
-            if self.img_feat_collapsed_pos is None:
-                img_feat_collapsed_pos = self.img_feat_collapsed_po = self.create_2D_grid(1, img_feat_collapsed.shape[-1]).to(img_feat.device)
+                # positional encoding for image guided query initialization
+                if self.img_feat_collapsed_pos is None:
+                    img_feat_collapsed_pos = self.img_feat_collapsed_po = self.create_2D_grid(1, img_feat_collapsed.shape[-1]).to(img_feat.device)
+                else:
+                    img_feat_collapsed_pos = self.img_feat_collapsed_pos
+
+                bev_feat = lidar_feat_flatten
+                assert len(self.decoder)==self.num_decoder_layers+self.num_fusion_layers+self.num_views
+                for idx_view in range(self.num_views):
+                    bev_feat = self.decoder[self.num_decoder_layers + self.num_fusion_layers + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
             else:
-                img_feat_collapsed_pos = self.img_feat_collapsed_pos
-
-            bev_feat = lidar_feat_flatten
-            assert len(self.decoder)==self.num_decoder_layers+self.num_fusion_layers+self.num_views
-            for idx_view in range(self.num_views):
-                bev_feat = self.decoder[self.num_decoder_layers + self.num_fusion_layers + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
+                img_feat_shrink = self.conv(img_feat)
+                if self.img_feat_shrink_pos is None:
+                    (h, w) = img_feat_shrink.shape[-2], img_feat_shrink.shape[-1]
+                    img_feat_shrink_pos = self.img_feat_shrink_pos = self.create_2D_grid(h, w).to(img_feat_shrink.device)
+                else:
+                    img_feat_shrink_pos = self.img_feat_shrink_pos
+                img_feat_shrink = img_feat_shrink.view(batch_size, num_channel, -1)
+                bev_feat = lidar_feat_flatten
+                assert len(self.decoder)==self.num_decoder_layers+self.num_fusion_layers+1
+                bev_feat = self.decoder[self.num_decoder_layers + self.num_fusion_layers](bev_feat, img_feat_shrink, bev_pos, img_feat_shrink_pos)
         #################################
         # image guided query initialization
         #################################
@@ -860,6 +880,7 @@ class TransFusionHead(nn.Module):
             if self.test_cfg['dataset'] == 'nuScenes':
                 local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
                 local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
+            # TODO
             # elif self.test_cfg['dataset'] in ['Waymo','VODDataset']:  # for Pedestrian & Cyclist in Waymo and VOD
             #     local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
             #     local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
@@ -955,6 +976,7 @@ class TransFusionHead(nn.Module):
                     img_pad_shape = img_metas[sample_idx]['input_shape'][:2]
                     boxes = LiDARInstance3DBoxes(pred_boxes[sample_idx]['bboxes'][:, :7], box_dim=7)
                     query_pos_3d_with_corners = torch.cat([query_pos_3d[sample_idx], boxes.corners.permute(2, 0, 1).view(3, -1)], dim=-1)  # [3, num_proposals] + [3, num_proposals*8]
+                    
                     # transform point clouds back to original coordinate system by reverting the data augmentation
                     if batch_size == 1:  # skip during inference to save time
                         points = query_pos_3d_with_corners.T
@@ -999,18 +1021,33 @@ class TransFusionHead(nn.Module):
                             continue
                         on_the_image_mask[sample_idx, on_the_image] = view_idx
 
+                        if not self.fuse_bev:
                         # add spatial constraint
-                        center_ys = (coor_y[on_the_image] / self.out_size_factor_img)
-                        center_xs = (coor_x[on_the_image] / self.out_size_factor_img)
-                        centers = torch.cat([center_xs, center_ys], dim=-1).int()  # center on the feature map
-                        corners = (coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values) / self.out_size_factor_img
-                        radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()  # radius of the minimum circumscribed circle of the wireframe
+                        # TODO need to be changed for BEV
+                        # gaussian radius
+                            center_ys = (coor_y[on_the_image] / self.out_size_factor_img) #TODO to check
+                            center_xs = (coor_x[on_the_image] / self.out_size_factor_img)
+                            centers = torch.cat([center_xs, center_ys], dim=-1).int()  # center on the feature map
+                            corners = (coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values) / self.out_size_factor_img
+                            radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()  # radius of the minimum circumscribed circle of the wireframe
+                        else:
+                            points_bev = points[:,:]
+                            points_bev[:,:2] = (points[:,:2]-self.test_cfg['pc_range'][0])/self.test_cfg['out_size_factor']/self.test_cfg['voxel_size'][0]
+                            points_bev_centers, points_bev_corners = points_bev[:self.num_proposals], points_bev[self.num_proposals:].view(self.num_proposals,8,3)
+                            
+                            pts2img_bev_scale_factor = torch.Tensor([lidar_feat.shape[-2]/img_feat.shape[-2],lidar_feat.shape[-1]/img_feat.shape[-1]]).to(points_bev.device) #to img_bev
+                            center_xs, center_ys = torch.split(points_bev_centers[on_the_image,:2]/pts2img_bev_scale_factor, 1, dim=1)
+                            centers = torch.cat([center_xs, center_ys], dim=-1).int() 
+                            coor_corner_xy = points_bev_corners[:,:,:2]/pts2img_bev_scale_factor
+                            corners = coor_corner_xy[on_the_image].max(1).values - coor_corner_xy[on_the_image].min(1).values
+                            radius = torch.ceil(corners.norm(dim=-1, p=2) / 2).int()
+                        #TODO: need to be check
                         sigma = (radius * 2 + 1) / 6.0
-                        distance = (centers[:, None, :] - (img_feat_pos - 0.5)).norm(dim=-1) ** 2
+                        distance = (centers[:, None, :] - (img_feat_pos - 0.5)).norm(dim=-1) ** 2 #pixel_distance_squared
                         gaussian_mask = (-distance / (2 * sigma[:, None] ** 2)).exp()
                         gaussian_mask[gaussian_mask < torch.finfo(torch.float32).eps] = 0
                         attn_mask = gaussian_mask
-
+                        
                         query_feat_view = prev_query_feat[sample_idx, :, on_the_image]
                         query_pos_view = torch.cat([center_xs, center_ys], dim=-1)
                         query_feat_view = self.decoder[self.num_decoder_layers+i](query_feat_view[None], img_feat_flatten[sample_idx:sample_idx + 1, view_idx], query_pos_view[None], img_feat_pos, attn_mask=attn_mask.log())
@@ -1337,9 +1374,7 @@ class TransFusionHead(nn.Module):
             batch_vel = None
             if 'vel' in preds_dict[0]:
                 batch_vel = preds_dict[0]['vel'][..., -self.num_proposals:]
-
             temp = self.bbox_coder.decode(batch_score, batch_rot, batch_dim, batch_center, batch_height, batch_vel, filter=True)
-
             if self.test_cfg['dataset'] == 'nuScenes':
                 self.tasks = [
                     dict(num_class=8, class_names=[], indices=[0, 1, 2, 3, 4, 5, 6, 7], radius=-1),

@@ -51,7 +51,7 @@ test_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=7, use_dim=[0,1,2,3,5]),
     dict(
         type='MultiScaleFlipAug3D',
-        img_scale=(1333, 800),
+        img_scale=(800, 448),
         pts_scale_ratio=1,
         flip=False,
         transforms=[

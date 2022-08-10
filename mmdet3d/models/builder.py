@@ -70,7 +70,7 @@ def build_fusion_layer(cfg):
     return build(cfg, FUSION_LAYERS)
 
 def build_vtransform(cfg):
-    return VTRANSFORMS.build(cfg)
+    return build(cfg, VTRANSFORMS)
 
 def build_fuser(cfg):
     return FUSERS.build(cfg)

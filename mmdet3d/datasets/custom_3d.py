@@ -151,7 +151,7 @@ class Custom3DDataset(Dataset):
         example = self.pipeline(input_dict)
         if self.filter_empty_gt and \
                 (example is None or
-                    ~(example['gt_labels_3d']._data != -1).any()):
+                    ~(example['gt_labels_3d']._data != -1).any()): # make list for currently
             return None
         return example
 
