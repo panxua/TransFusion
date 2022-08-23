@@ -100,10 +100,13 @@ model = dict(
         norm_eval=True,
         style='pytorch'),
     neck=dict(
-        type='FPN',
+        type='GeneralizedLSSFPN',
         in_channels=[256, 512, 1024, 2048],
-        out_channels=256,
-        num_outs=5),
+        out_channels=256,   
+        num_outs=3,
+        norm_cfg=dict(type="BN2d",requires_grad=True),
+        act_cfg=dict(type="ReLU",inplace=True),
+        upsample_cfg=dict(mode="bilinear",align_corners=False)),
     rpn_head=dict(
         type='RPNHead',
         in_channels=256,
@@ -112,7 +115,7 @@ model = dict(
             type='AnchorGenerator',
             scales=[8],
             ratios=[0.5, 1.0, 2.0],
-            strides=[4, 8, 16, 32, 64]),
+            strides=[4, 8, 16]),
         bbox_coder=dict(
             type='DeltaXYWHBBoxCoder',
             target_means=[0.0, 0.0, 0.0, 0.0],

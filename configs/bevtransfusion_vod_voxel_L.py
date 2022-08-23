@@ -11,6 +11,9 @@ input_modality = dict(
     use_radar=True,
     use_map=False,
     use_external=False)
+img_scale = (448, 800) #TODO wrong
+img_norm_cfg = dict(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+
 train_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=7, use_dim=[0,1,2,3,5]),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
@@ -51,7 +54,7 @@ test_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=7, use_dim=[0,1,2,3,5]),
     dict(
         type='MultiScaleFlipAug3D',
-        img_scale=(1333, 800),
+        img_scale=img_scale,
         pts_scale_ratio=1,
         flip=False,
         transforms=[
@@ -70,8 +73,8 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=2,
+    samples_per_gpu=3,
+    workers_per_gpu=4,
     train=dict(
         type='RepeatDataset',
         times=1,
@@ -88,8 +91,8 @@ data = dict(
     val=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + '/vod_radar_infos_val.pkl',
-        split='training',
+        ann_file=data_root + '/vod_radar_infos_test.pkl',
+        split='testing',
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -127,7 +130,7 @@ model = dict(
     pts_middle_encoder=dict(
         type='SparseEncoder',
         in_channels=64,
-        sparse_shape=[41, 1504, 1504],
+        sparse_shape=[41, 512, 512],
         output_channels=128,
         order=('conv', 'norm', 'act'),
         encoder_channels=((16, 16, 32), (32, 32, 64), (64, 64, 128), (128, 128)),
@@ -193,7 +196,7 @@ model = dict(
             pos_weight=-1,
             gaussian_overlap=0.1,
             min_radius=2,
-            grid_size=[1504, 1504, 40],  # [x_len, y_len, 1]
+            grid_size=[512, 512, 40],  # [x_len, y_len, 1]
             voxel_size=voxel_size,
             out_size_factor=out_size_factor,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -201,7 +204,7 @@ model = dict(
     test_cfg=dict(
         pts=dict(
             dataset='VODDataset',
-            grid_size=[1504, 1504, 40],
+            grid_size=[512, 512, 40],
             out_size_factor=out_size_factor,
             voxel_size=voxel_size[:2],
             nms_type=None,
@@ -218,7 +221,7 @@ momentum_config = dict(
     target_ratio=(0.8947368421052632, 1),
     cyclic_times=1,
     step_ratio_up=0.4)
-total_epochs = 20
+total_epochs = 35
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=50,
@@ -227,7 +230,7 @@ log_config = dict(
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = None
-load_from = "models/bevfusion_fade_e18_bevfusion-det.pth"
-resume_from = None
+load_from =  None
+resume_from = None #'work_dirs/bevtransfusion_vod_voxel_L/epoch_15.pth', #'work_dirs/bevtransfusion_vod_voxel_L/small/epoch_5.pth'
 workflow = [('train', 1)]
 gpu_ids = range(0, 8)

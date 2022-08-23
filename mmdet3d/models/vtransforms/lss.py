@@ -3,6 +3,7 @@ from typing import Tuple
 from mmcv.runner import force_fp32
 from torch import nn
 
+from mmcv.cnn import kaiming_init
 from mmdet3d.models.builder import VTRANSFORMS
 
 from .base import BaseTransform
@@ -57,6 +58,11 @@ class LSSTransform(BaseTransform):
             )
         else:
             self.downsample = nn.Identity()
+            
+    def init_weights(self):
+        for m in self.downsample.modules():
+            if isinstance(m, nn.Conv2d):
+                kaiming_init(m)
 
     @force_fp32()
     def get_cam_feats(self, x):

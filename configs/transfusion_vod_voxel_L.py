@@ -14,19 +14,19 @@ input_modality = dict(
 train_pipeline = [
     dict(type='LoadPointsFromFile', coord_type='LIDAR', load_dim=7, use_dim=[0,1,2,3,5]),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
-    # dict(type='ObjectSample',
-    #      db_sampler=dict(
-    #          data_root=data_root,
-    #          info_path=data_root + '/vod_radar_dbinfos_train.pkl',
-    #          rate=1.0,
-    #          prepare=dict(
-    #              filter_by_difficulty=[-1],
-    #              filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
-    #          classes=class_names,
-    #          sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
-    #          points_loader=dict(
-    #              type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
-    #      ),
+    dict(type='ObjectSample',
+         db_sampler=dict(
+             data_root=data_root,
+             info_path=data_root + '/vod_radar_dbinfos_train.pkl',
+             rate=1.0,
+             prepare=dict(
+                 filter_by_difficulty=[-1],
+                 filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
+             classes=class_names,
+             sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
+             points_loader=dict(
+                 type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
+         ),
     dict(
         type='RandomFlip3D',
         sync_2d=False,

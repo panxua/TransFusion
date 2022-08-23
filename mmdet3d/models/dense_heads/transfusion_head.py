@@ -1,14 +1,15 @@
 import copy
 import numpy as np
+
 import torch
-from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init
-from mmcv.runner import force_fp32
 from torch import nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn import Linear
-from torch.nn.init import xavier_uniform_, constant_
+from torch.nn.init import xavier_uniform_, constant_, xavier_normal_
 
+from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init, xavier_init
+from mmcv.runner import force_fp32
 from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
                           xywhr2xyxyr, limit_period, PseudoSampler)
 from mmdet3d.core.bbox.structures import rotation_3d_in_axis
@@ -110,9 +111,13 @@ class TransformerDecoderLayer(nn.Module):
         query2 = self.multihead_attn(query=self.with_pos_embed(query, query_pos_embed),
                                      key=self.with_pos_embed(key, key_pos_embed),
                                      value=self.with_pos_embed(key, key_pos_embed), attn_mask=attn_mask)[0]
+        # TODO: check
+        # query (q,h), there might be (k, h) in the query that are non-relevant to the (HW, h)
+        # the mask (k, HW) will be all True(-inf), and hence NAN after softmax in attention
         query = query + self.dropout2(query2)
         query = self.norm2(query)
 
+        # those NANs will keep and will not propogate to other queries, because the linear and norm ops are all within the query
         query2 = self.linear2(self.dropout(self.activation(self.linear1(query))))
         query = query + self.dropout3(query2)
         query = self.norm3(query)
@@ -594,6 +599,7 @@ class TransFusionHead(nn.Module):
     def __init__(self,
                  fuse_img=False,
                  fuse_img_decoder=True,
+                 fuse_fov=False,
                  fuse_bev=False,
                  fuse_bev_collapse=True,
                  num_views=0,
@@ -716,6 +722,7 @@ class TransFusionHead(nn.Module):
         self.fuse_img = fuse_img
         self.fuse_img_decoder = self.fuse_img and fuse_img_decoder
         self.fuse_bev = self.fuse_img and fuse_bev
+        assert not self.fuse_img or (fuse_fov != fuse_bev)
         self.fuse_bev_collapse = self.fuse_bev and fuse_bev_collapse
 
         if self.fuse_img:
@@ -755,8 +762,27 @@ class TransFusionHead(nn.Module):
             if not self.fuse_bev or self.fuse_bev_collapse:       
                 self.fc = nn.Sequential(*[nn.Conv1d(hidden_channel, hidden_channel, kernel_size=1)])
             else:
-                self.conv = nn.Sequential(*[nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1),
-                                            nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1)])
+                # self.downsample = nn.Sequential(
+                # nn.Conv2d(hidden_channel, hidden_channel, 3, padding=1, bias=False),
+                # nn.BatchNorm2d(hidden_channel),
+                # nn.ReLU(True),
+                # nn.Conv2d(
+                #     hidden_channel,
+                #     hidden_channel,
+                #     3,
+                #     stride=2,
+                #     padding=1,
+                #     bias=False,
+                # ),
+                # nn.BatchNorm2d(hidden_channel),
+                # nn.ReLU(True),
+                # nn.Conv2d(hidden_channel, hidden_channel, 3, padding=1, bias=False),
+                # nn.BatchNorm2d(hidden_channel),
+                # nn.ReLU(True),
+                # )
+                self.shrink_conv = nn.Sequential(*[
+                    nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1),
+                    nn.Conv2d(hidden_channel, hidden_channel, kernel_size=3, stride=2, padding=1)])
 
         self.init_weights()
         self._init_assigner_sampler()
@@ -786,6 +812,21 @@ class TransFusionHead(nn.Module):
                 nn.init.xavier_uniform_(m)
         if hasattr(self, 'query'):
             nn.init.xavier_normal_(self.query)
+
+        assert not self.fuse_bev or self.fuse_img,"bug"
+        if self.fuse_bev:
+            if not self.fuse_bev_collapse:
+                for m in self.shrink_conv.modules():
+                    if isinstance(m, nn.Conv2d):
+                        kaiming_init(m)
+
+            for m in self.shared_conv_img.modules():
+                if isinstance(m, nn.Conv2d):
+                    kaiming_init(m)
+
+            for ffn in self.prediction_heads:
+                ffn.init_weights()
+            
         self.init_bn_momentum()
 
     def init_bn_momentum(self):
@@ -809,7 +850,7 @@ class TransFusionHead(nn.Module):
                 build_assigner(res) for res in self.train_cfg.assigner
             ]
 
-    def forward_single(self, inputs, img_inputs, img_metas):
+    def forward_single(self, inputs, fov_inputs, bev_inputs, img_metas):
         """Forward function for CenterPoint.
 
         Args:
@@ -830,6 +871,7 @@ class TransFusionHead(nn.Module):
         bev_pos = self.bev_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)
 
         if self.fuse_img:
+            img_inputs = fov_inputs if not self.fuse_bev else bev_inputs
             img_feat = self.shared_conv_img(img_inputs)  # [BS * n_views, C, H, W]
 
             img_h, img_w, num_channel = img_inputs.shape[-2], img_inputs.shape[-1], img_feat.shape[1]
@@ -850,7 +892,7 @@ class TransFusionHead(nn.Module):
                 for idx_view in range(self.num_views):
                     bev_feat = self.decoder[self.num_decoder_layers + self.num_fusion_layers + idx_view](bev_feat, img_feat_collapsed[..., img_w * idx_view:img_w * (idx_view + 1)], bev_pos, img_feat_collapsed_pos[:, img_w * idx_view:img_w * (idx_view + 1)])
             else:
-                img_feat_shrink = self.conv(img_feat)
+                img_feat_shrink = self.shrink_conv(img_feat)
                 if self.img_feat_shrink_pos is None:
                     (h, w) = img_feat_shrink.shape[-2], img_feat_shrink.shape[-1]
                     img_feat_shrink_pos = self.img_feat_shrink_pos = self.create_2D_grid(h, w).to(img_feat_shrink.device)
@@ -880,10 +922,9 @@ class TransFusionHead(nn.Module):
             if self.test_cfg['dataset'] == 'nuScenes':
                 local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
                 local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
-            # TODO
-            # elif self.test_cfg['dataset'] in ['Waymo','VODDataset']:  # for Pedestrian & Cyclist in Waymo and VOD
-            #     local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
-            #     local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
+            elif self.test_cfg['dataset'] in ['Waymo','VODDataset']:  # for Pedestrian & Cyclist in Waymo and VOD
+                local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
+                local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
             heatmap = heatmap * (heatmap == local_max)
             heatmap = heatmap.view(batch_size, heatmap.shape[1], -1)
 
@@ -902,7 +943,7 @@ class TransFusionHead(nn.Module):
             query_pos = bev_pos.gather(index=top_proposals_index[:, None, :].permute(0, 2, 1).expand(-1, -1, bev_pos.shape[-1]), dim=1)
         else:
             query_feat = self.query_feat.repeat(batch_size, 1, 1)  # [BS, C, num_proposals]
-            base_xyz = self.query_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)  # [BS, num_proposals, 2]
+            query_pos = self.query_pos.repeat(batch_size, 1, 1).to(lidar_feat.device)  # [BS, num_proposals, 2]
 
         #################################
         # transformer decoder layer (LiDAR feature as K,V)
@@ -1051,7 +1092,8 @@ class TransFusionHead(nn.Module):
                         query_feat_view = prev_query_feat[sample_idx, :, on_the_image]
                         query_pos_view = torch.cat([center_xs, center_ys], dim=-1)
                         query_feat_view = self.decoder[self.num_decoder_layers+i](query_feat_view[None], img_feat_flatten[sample_idx:sample_idx + 1, view_idx], query_pos_view[None], img_feat_pos, attn_mask=attn_mask.log())
-                        query_feat[sample_idx, :, on_the_image] = query_feat_view.clone()
+                        nan_mask = torch.isnan(query_feat_view)
+                        query_feat[sample_idx, :, on_the_image][~nan_mask.squeeze()] = query_feat_view.clone()[[~nan_mask]]
                 
                 if self.auxiliary:
                     self.on_the_image_mask = torch.cat([self.on_the_image_mask,(on_the_image_mask != -1)],1)
@@ -1101,8 +1143,8 @@ class TransFusionHead(nn.Module):
             tuple(list[dict]): Output results. first index by level, second index by layer
         """
         if img_feats is None:
-            img_feats = [None]
-        res = multi_apply(self.forward_single, feats, img_feats, [img_metas])
+            img_feats = [[None],[None]]
+        res = multi_apply(self.forward_single, feats, *img_feats, [img_metas])
         assert len(res) == 1, "only support one level features."
         return res
 

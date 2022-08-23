@@ -20,10 +20,14 @@ from .transfusion import TransFusionDetector
 @DETECTORS.register_module()
 class BEVTransFusionDetector(TransFusionDetector):
     def __init__(self, 
+                 freeze_bev_encoder=False,
                  img_vtransform=None,
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
                  **kwargs):
+        self.freeze_img = kwargs.get('freeze_img', True)
+        self.freeze_bev_encoder = self.freeze_img and freeze_bev_encoder
+        
         super(BEVTransFusionDetector, self).__init__(**kwargs)
 
         if img_vtransform:
@@ -36,12 +40,21 @@ class BEVTransFusionDetector(TransFusionDetector):
             self.img_bev_encoder_neck = builder.build_neck(
                 img_bev_encoder_neck)
 
-        self.freeze_img = kwargs.get('freeze_img', True)
         self.init_weights(pretrained=kwargs.get('pretrained', None))
 
     def init_weights(self, pretrained=None):
         """Initialize model weights."""
-        super(TransFusionDetector, self).init_weights(pretrained)
+        super(BEVTransFusionDetector, self).init_weights(pretrained)
+        if self.with_img_vtransform:
+            self.img_vtransform.init_weights()
+        # if self.with_img_bev_encoder_backbone:
+        #     self.img_bev_encoder_backbone.init_weights()
+        # if self.with_img_bev_encoder_neck:
+        #     if isinstance(self.img_bev_encoder_neck, nn.Sequential):
+        #         for m in self.img_bev_encoder_neck:
+        #             m.init_weights()
+        #     else:
+        #         self.img_bev_encoder_neck.init_weights()
         if self.freeze_img:
             if self.with_img_backbone:
                 for param in self.img_backbone.parameters():
@@ -49,17 +62,23 @@ class BEVTransFusionDetector(TransFusionDetector):
             if self.with_img_neck:
                 for param in self.img_neck.parameters():
                     param.requires_grad = False
+
+        if self.freeze_bev_encoder:
             if self.with_img_vtransform:
                 for param in self.img_vtransform.parameters():
                     param.requires_grad = False
+
             if self.with_img_bev_encoder_backbone:
                 for param in self.img_bev_encoder_backbone.parameters():
                     param.requires_grad = False
+
             if self.with_img_bev_encoder_neck:
                 for param in self.img_bev_encoder_neck.parameters():
                     param.requires_grad = False
+        
     def extract_img_feat(self, img, points, img_metas):
         """Extract features of images."""
+        fov_feats, bev_feats = None, None
         if self.with_img_backbone and img is not None:
             input_shape = img.shape[-2:]
             # update real input shape of each single img
@@ -76,6 +95,7 @@ class BEVTransFusionDetector(TransFusionDetector):
             return None
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
+        fov_feats = img_feats
 
         # project to BEV
         if self.with_img_vtransform:
@@ -89,7 +109,8 @@ class BEVTransFusionDetector(TransFusionDetector):
             img_feats = self.img_bev_encoder_backbone(img_feats)
         if self.with_img_bev_encoder_neck:
             img_feats = self.img_bev_encoder_neck(img_feats)
-        return [img_feats]
+        bev_feats = img_feats
+        return [fov_feats, [bev_feats]]
 
     def transform_img_feat(self, pts, img_feats, img_metas):
         assert 'flip' not in img_metas[0].keys() or not img_metas[0]['flip'], "not implemented"
@@ -247,25 +268,26 @@ class BEVTransFusionDetector(TransFusionDetector):
             for bboxes, scores, labels in bbox_list
         ]
 
-        # # for debug #
+        # for debug #
         # print('warning debuging')
         # heatmaps, anno_boxes, inds, masks = self.pts_bbox_head.get_targets(
         #     kwargs['gt_bboxes_3d'][0], kwargs['gt_labels_3d'][0])
         # targets = []
         # anno_boxes = anno_boxes
-        # for task_id, preds_dict in enumerate(outs):
+        # for task_id, preds_dict in enumerate(anno_boxes):
         #     # heatmap focal loss
-        #     regs = torch.Tensor(1,2,64,64).cuda()
-        #     heights = torch.Tensor(1,1,64,64).cuda()
-        #     dim = torch.Tensor(1,3,64,64).cuda()
-        #     rot = torch.Tensor(1,2,64,64).cuda()
-        #     for i, ind in enumerate(inds[task_id][0]):
+        #     regs = torch.zeros(1,2,64,64).cuda()
+        #     heights = torch.zeros(1,1,64,64).cuda()
+        #     dim = torch.zeros(1,3,64,64).cuda()
+        #     rot = torch.zeros(1,2,64,64).cuda()
+        #     for i, ind in enumerate(inds[task_id][0][masks[task_id][0]!=0]):
         #         y = ind//64
         #         x = ind%64
-        #         regs[0,:,x,y] = anno_boxes[task_id][0][i][:2]
-        #         heights[0,:,x,y] = anno_boxes[task_id][0][i][2]
-        #         dim[0,:,x,y] = anno_boxes[task_id][0][i][3:6]
-        #         rot[0,:,x,y]= anno_boxes[task_id][0][i][6:8]
+        #         #TODO check
+        #         regs[0,:,y,x] = preds_dict[0][i][:2]
+        #         heights[0,:,y,x] = preds_dict[0][i][2]
+        #         dim[0,:,y,x] = preds_dict[0][i][3:6]
+        #         rot[0,:,y,x]= preds_dict[0][i][6:8]
         #     targets.append([{'reg':regs,'height':heights, 'dim':dim, 'rot':rot, 'heatmap':heatmaps[task_id]}])
         # temp_bbox_list = self.pts_bbox_head.get_bboxes(
         #     targets, img_metas, rescale=rescale) # decode to bboxes
@@ -274,7 +296,7 @@ class BEVTransFusionDetector(TransFusionDetector):
         #     for bboxes, scores, labels in temp_bbox_list
         # ]
 
-        return temp_bbox_results
+        return bbox_results
 
     def simple_test(self, points, img_metas, img=None, rescale=False, **kwargs):
         """Test function without augmentaiton."""

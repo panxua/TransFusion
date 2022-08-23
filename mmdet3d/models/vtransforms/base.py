@@ -50,6 +50,9 @@ class BaseTransform(nn.Module):
         self.D = self.frustum.shape[0]
         self.fp16_enabled = False
 
+    def init_weights(self):
+        raise NotImplementedError
+
     @force_fp32()
     def create_frustum(self):
         iH, iW = self.image_size

@@ -1,6 +1,6 @@
 point_cloud_range = [0, -25.6, -3, 51.2, 25.6, 2]
 class_names = ['Car', 'Pedestrian', 'Cyclist']
-voxel_size = [0.1, 0.1, 0.15]
+voxel_size = [0.1, 0.1, 0.125]
 out_size_factor = 8
 evaluation = dict(interval=1)
 dataset_type = 'VODDataset'
@@ -86,7 +86,7 @@ test_pipeline = [
                 class_names=class_names,
                 # with_label=False
                 ),
-            dict(type='Collect3D', keys=['points', 'img'])
+            dict(type='Collect3D', keys=['points', 'img'])  
             # dict(type='Collect3D', keys=['points', 'img', 'gt_bboxes_3d', 'gt_labels_3d'])
         ])
 ]
@@ -251,7 +251,7 @@ model = dict(
             min_radius=[2],
             score_threshold=0,
             pre_max_size=1000, #??
-            post_max_size=83,
+            post_max_size=15,
             # nms_type = "circle"
             # # Scale-NMS
             nms_type='rotate',

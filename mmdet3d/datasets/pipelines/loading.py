@@ -1,6 +1,5 @@
 import mmcv
 import numpy as np
-
 from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import LoadAnnotations
@@ -428,16 +427,37 @@ class LoadMultiViewImageFromFiles(object):
         color_type (str): Color type of the file. Defaults to 'unchanged'.
     """
 
-    def __init__(self, to_float32=False, img_scale=None, color_type='unchanged'):
+    def __init__(self, to_float32=False, img_scale=None, color_type='unchanged', **kwargs):
         self.to_float32 = to_float32
         self.img_scale = img_scale
         self.color_type = color_type
+        self.img_transform = np.eye(4)
+        if 'flip' in kwargs.keys():
+            self.flip = kwargs['kwargs']
+        if 'rot' in kwargs.keys():
+            self.flip = kwargs['kwargs']
 
     def pad(self, img):
         # to pad the 5 input images into a same size (for Waymo)
         if img.shape[0] != self.img_scale[0]:
             img = np.concatenate([img, np.zeros_like(img[0:1280-886,:])], axis=0)
         return img
+
+    def flip(self,img):
+        flip = True if np.random.rand()<self.flip else False
+        if flip:
+            flip_matrix = np.eye(4)[1,0,2,3]
+            self.img_transform = flip_matrix@self.img_transform
+            img = np.flip(img,1)
+
+    def rot(self,img):
+        rot = np.random.rand()*(self.rot[1]-self.rot[0]) + self.rot[0]
+        rot = self.rot * np.pi / 180
+        rot_matrix = np.array([
+            [np.cos(rot), np.sin(rot)],
+            [-np.sin(rot), np.cos(rot)],
+        ])
+
 
     def __call__(self, results):
         """Call function to load multi-view image from files.

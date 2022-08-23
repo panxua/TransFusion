@@ -11,6 +11,7 @@ from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
                           xywhr2xyxyr)
 from mmdet3d.models import builder
 from mmdet3d.models.builder import HEADS, build_loss
+from mmdet3d.models.losses.axis_aligned_iou_loss import AxisAlignedIoULoss
 from mmdet3d.models.losses.rotated_iou_loss import RotatedIoU3DLoss
 from mmdet3d.models.utils import clip_sigmoid
 from mmdet3d.ops.iou3d.iou3d_utils import nms_gpu
@@ -626,7 +627,7 @@ class CenterHead(nn.Module):
             code_weights = self.train_cfg.get('code_weights', None)
             bbox_weights = mask * mask.new_tensor(code_weights)
             #TODO: check
-            if isinstance(self.loss_bbox, RotatedIoU3DLoss):
+            if isinstance(self.loss_bbox, RotatedIoU3DLoss) or isinstance(self.loss_bbox, AxisAlignedIoULoss):
                 '''
                 preds B, reg, height, dim, rot -> B, xyz wlh, alpha(camera)
                 '''
@@ -637,38 +638,43 @@ class CenterHead(nn.Module):
                 lidar_ys = (ys*self.train_cfg['out_size_factor']*self.train_cfg['voxel_size'][1] + self.train_cfg['point_cloud_range'][1]).unsqueeze(-1)
                 lidar_zs = pred[:,:,2,None] # z 2
                 lidar_coor = torch.stack([lidar_xs,lidar_ys,lidar_zs,torch.ones(lidar_xs.shape).to(lidar_xs.device)], dim=2)
-                lidar2cam = torch.Tensor([img_meta['lidar2cam'][0] for img_meta in img_metas]).to(lidar_coor.device)
-                B, N = lidar_coor.shape[:2]
-                #TODO: check
-                cam_coor = (lidar2cam.unsqueeze(1).repeat([1,N,1,1])@lidar_coor)[:,:,:3,-1]
-                l, w, h = pred[:,:,3,None], pred[:,:,4,None], pred[:,:,5,None] # x_dim 3, y_dim 4, z_dim 5
-                rot = torch.atan2(pred[:,:,6],pred[:,:,7]) # rots 6, rotc 7
-                alpha = torch.atan2(cam_coor[:,:,2], cam_coor[:,:,0]) + rot + math.pi*1.5 # arctan2(z,x)
+                lidar_bbox = torch.cat([lidar_coor, pred[:,:,3,None], pred[:,:,4,None], pred[:,:,5,None], alpha], dim=2)
 
-                temp_ind = alpha % (math.pi*2)==0
-                alpha[(mask[:,:,0]!=0) & temp_ind] += math.pi*2 # if divide
-                alpha[(mask[:,:,0]!=0) & ~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
-                alpha = alpha.unsqueeze(-1)
-                assert torch.all(-math.pi < alpha[(mask[:,:,0]!=0)]) and torch.all(alpha[(mask[:,:,0]!=0)] < math.pi), "bug"
+                if isinstance(self.loss_bbox, RotatedIoU3DLoss):
+                    lidar2cam = torch.Tensor([img_meta['lidar2cam'][0] for img_meta in img_metas]).to(lidar_coor.device)
+                    B, N = lidar_coor.shape[:2]
+                    #TODO: check
+                    cam_coor = (lidar2cam.unsqueeze(1).repeat([1,N,1,1])@lidar_coor)[:,:,:3,-1]
+                    l, w, h = pred[:,:,3,None], pred[:,:,4,None], pred[:,:,5,None] # x_dim 3, y_dim 4, z_dim 5
+                    rot = torch.atan2(pred[:,:,6],pred[:,:,7]) # rots 6, rotc 7
+                    alpha = torch.atan2(cam_coor[:,:,2], cam_coor[:,:,0]) + rot + math.pi*1.5 # arctan2(z,x)
 
-                pred = torch.cat([cam_coor, w, l, h, alpha], dim=2) * mask[:,:,:7]
+                    temp_ind = alpha % (math.pi*2)==0
+                    alpha[(mask[:,:,0]!=0) & temp_ind] += math.pi*2 # if divide
+                    alpha[(mask[:,:,0]!=0) & ~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
+                    alpha = alpha.unsqueeze(-1)
+                    assert torch.all(-math.pi < alpha[(mask[:,:,0]!=0)]) and torch.all(alpha[(mask[:,:,0]!=0)] < math.pi), "bug"
+
+                    pred = torch.cat([cam_coor, w, l, h, alpha], dim=2) * mask[:,:,:7]
 
                 ''' 
                 gt_bboxes_3d lidar(x,y,z), dim, rotate -> camera(x,y,z), wlh, alpha
                 '''
                 target_box = torch.Tensor(*pred.shape).to(pred.device)
-                for batch_idx, bbox in enumerate(gt_bboxes_3d):
-                    cam_bboxes = bbox.convert_to(Box3DMode.CAM, img_metas[batch_idx]['lidar2cam'][0]).tensor
-                    cam_bboxes[:,3], cam_bboxes[:,4], cam_bboxes[:,5] = cam_bboxes[:,4], cam_bboxes[:,3], cam_bboxes[:,5]
+                if isinstance(self.loss_bbox, RotatedIoU3DLoss):
+                    for batch_idx, bbox in enumerate(gt_bboxes_3d):
+                        cam_bboxes = bbox.convert_to(Box3DMode.CAM, img_metas[batch_idx]['lidar2cam'][0]).tensor
+                        cam_bboxes[:,3], cam_bboxes[:,4], cam_bboxes[:,5] = cam_bboxes[:,4], cam_bboxes[:,3], cam_bboxes[:,5]
 
-                    alpha = torch.atan2(cam_bboxes[:,2], cam_bboxes[:,0]) + cam_bboxes[:,6] + math.pi*1.5
-                    temp_ind = alpha % (math.pi*2)==0
-                    alpha[temp_ind] += math.pi*2 # if divide
-                    alpha[~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
-                    cam_bboxes[:,6] = alpha
-                    assert torch.all(-math.pi < alpha) and torch.all(alpha < math.pi), "bug"
-
-                    target_box[batch_idx, :cam_bboxes.shape[0]] = cam_bboxes
+                        alpha = torch.atan2(cam_bboxes[:,2], cam_bboxes[:,0]) + cam_bboxes[:,6] + math.pi*1.5
+                        temp_ind = alpha % (math.pi*2)==0
+                        alpha[temp_ind] += math.pi*2 # if divide
+                        alpha[~temp_ind & (alpha>math.pi)] -= math.pi*2 # else if > pi
+                        cam_bboxes[:,6] = alpha
+                        assert torch.all(-math.pi < alpha) and torch.all(alpha < math.pi), "bug"
+                        target_box[batch_idx, :cam_bboxes.shape[0]] = cam_bboxes
+                elif isinstance(self.loss_bbox, AxisAlignedIoULoss):
+                    target_box = bbox.tensor[:,:3]
 
             loss_bbox = self.loss_bbox(
                 pred, target_box, bbox_weights, avg_factor=(num + 1e-4))

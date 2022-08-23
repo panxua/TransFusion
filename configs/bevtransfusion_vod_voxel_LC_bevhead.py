@@ -11,8 +11,10 @@ input_modality = dict(
     use_radar=True,
     use_map=False,
     use_external=False)
-img_scale = (800, 448) #modified
+img_scale = (448, 800) #TODO wrong
 img_norm_cfg = dict(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+numC_Trans = 256
+
 train_pipeline = [
     dict(
         type='LoadPointsFromFile',
@@ -28,19 +30,19 @@ train_pipeline = [
     # ),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
     dict(type='LoadMultiViewImageFromFiles'),
-    # dict(type='ObjectSample',
-    #     db_sampler=dict(
-    #         data_root=data_root,
-    #         info_path=data_root + '/vod_radar_dbinfos_train.pkl',
-    #         rate=1.0,
-    #         prepare=dict(
-    #             filter_by_difficulty=[-1],
-    #             filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
-    #         classes=class_names,
-    #         sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
-    #         points_loader=dict(
-    #             type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
-    #     ),
+    dict(type='ObjectSample',
+        db_sampler=dict(
+            data_root=data_root,
+            info_path=data_root + '/vod_radar_dbinfos_train.pkl',
+            rate=1.0,
+            prepare=dict(
+                filter_by_difficulty=[-1],
+                filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
+            classes=class_names,
+            sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
+            points_loader=dict(
+                type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
+        ),
     # dict(
     #     type='GlobalRotScaleTrans',
     #     rot_range=[-0.3925 * 2, 0.3925 * 2],
@@ -98,8 +100,8 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=3,
-    workers_per_gpu=4,
+    samples_per_gpu=2,
+    workers_per_gpu=2,
     train=dict(
         type='RepeatDataset',
         times=1,
@@ -129,7 +131,7 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + '/vod_radar_infos_val.pkl',
-        split = "testing",
+        split = "training",
         # load_interval=1,
         pipeline=test_pipeline,
         classes=class_names,
@@ -148,11 +150,9 @@ data = dict(
     #     test_mode=True,
     #     box_type_3d='LiDAR'))
 model = dict(
-    type='TransFusionDetector',
-    freeze_img=True,
-    # pretrained=dict(
-    #     img="models/nuScenes_3Ddetection_e140.pth"
-    # ),
+    type='BEVTransFusionDetector',
+    freeze_img=False,
+    freeze_bev_encoder=False,
     # img_backbone=dict(
     #     type='DLASeg',
     #     num_layers=34,
@@ -163,16 +163,39 @@ model = dict(
         type='ResNet',
         depth=50,
         num_stages=4,
-        out_indices=(0, 1, 2, 3),
+        out_indices=(1, 2, 3),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch'),    
     img_neck=dict(
-        type='FPN',
-        in_channels=[256, 512, 1024, 2048],
-        out_channels=256,
-        num_outs=5),
+        type='GeneralizedLSSFPN',
+        in_channels=[512, 1024, 2048],
+        out_channels=256,   
+        num_outs=3,
+        norm_cfg=dict(type="BN2d",requires_grad=True),
+        act_cfg=dict(type="ReLU",inplace=True),
+        upsample_cfg=dict(mode="bilinear",align_corners=False)),
+    img_vtransform=dict(
+        type="DepthLSSTransform",
+        in_channels=256,
+        out_channels=64, #original 80
+        image_size=img_scale,
+        feature_size= (img_scale[0]//8,img_scale[1]//8),
+        xbound=[0, 51.2, 0.4],
+        ybound=[-25.6, 25.6, 0.4],
+        zbound=[-3.0, 2.0, 5.0], #[-10,10,20]
+        dbound=[1.0, 60.0, 0.5],
+        downsample=2),
+    # img_bev_encoder_backbone=dict(
+    #     type='ResNetForBEVDet',
+    #     numC_input=numC_Trans #256
+    # ),
+    # img_bev_encoder_neck=dict(
+    #     type='FPN_LSS',
+    #     in_channels=numC_Trans*8+numC_Trans*2, #2560
+    #     out_channels=256
+    # ),
     pts_voxel_layer=dict(
         max_num_points=5, #10
         voxel_size=voxel_size,
@@ -197,7 +220,8 @@ model = dict(
     pts_middle_encoder=dict(
         type='SparseEncoder',
         in_channels=64,
-        sparse_shape=[41, 1504, 1504],
+        sparse_shape = [41, 512, 512], #modified
+        # sparse_shape=[41, 1504, 1504],
         #sparse_shape=[41, 1440, 1440],
         output_channels=128,
         order=('conv', 'norm', 'act'),
@@ -221,14 +245,26 @@ model = dict(
         upsample_cfg=dict(type='deconv', bias=False),
         use_conv_for_no_stride=True),
     pts_bbox_head=dict(
-        type='TransFusionHead',
-        fuse_img=False,
-        fuse_fov=True,
-        fuse_bev=False,
-        # fuse_img_decoder=False,
-        num_views=1,
-        in_channels_img=256, # modified 256
+        type='BEVFusionHead',
 
+        # img fusion
+        fuser_cfg=dict(type="ConvFuser",in_channels=[80, 256], out_channels=256),
+        backbone_cfg = dict(type="SECOND",
+            in_channels=256,
+            out_channels=[128, 256],
+            layer_nums=[5, 5],
+            layer_strides=[1, 2],
+            norm_cfg=dict(type='BN', eps=1.0e-3, momentum=0.01),
+            conv_cfg=dict(type='Conv2d', bias=False)
+        ),
+        neck_cfg=dict(type='SECONDFPN',
+            in_channels=[128, 256],
+            out_channels=[256, 256],
+            upsample_strides=[1, 2]
+        ),
+        fuse_img=True,
+
+        # same as lidar only
         num_proposals=300,
         auxiliary=True,
         in_channels=256 * 2,
@@ -245,6 +281,7 @@ model = dict(
         dropout=0.1,
         bn_momentum=0.1,
         activation='relu',
+
         # common_heads=dict(center=(2, 2), height=(1, 2), dim=(3, 2), rot=(2, 2), vel=(2, 2)),
         common_heads=dict(center=(2, 2), height=(1, 2), dim=(3, 2), rot=(2, 2)),
         bbox_coder=dict(
@@ -252,7 +289,7 @@ model = dict(
             pc_range=point_cloud_range[:2],
             voxel_size=voxel_size[:2],
             out_size_factor=out_size_factor,
-            post_center_range=[0, -25.6, -3, 51.2, 25.6, 2],
+            post_center_range=[0, -25.6, -3.0, 51.2, 25.6, 2.0],
             score_threshold=0.0,
             code_size=8,
             # code_size=10,
@@ -275,7 +312,8 @@ model = dict(
             pos_weight=-1,
             gaussian_overlap=0.1,
             min_radius=2,
-            grid_size=[1504, 1504, 40], #[1440, 1440, 40],  # [x_len, y_len, 1]
+            # grid_size=[1504, 1504, 40],
+            grid_size= [512, 512, 40], # [1504, 1504, 40], #[1440, 1440, 40],  # [x_len, y_len, 1]
             voxel_size=voxel_size,
             out_size_factor=out_size_factor,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -284,7 +322,8 @@ model = dict(
     test_cfg=dict(
         pts=dict(
             dataset='VODDataset',
-            grid_size=[1504, 1504, 40], #[1440, 1440, 40],
+            # grid_size=[1504, 1504, 40],
+            grid_size=[512, 512, 40], #[1440, 1440, 40],
             out_size_factor=out_size_factor,
             pc_range=point_cloud_range[0:2],
             voxel_size=voxel_size[:2],
@@ -302,7 +341,7 @@ momentum_config = dict(
     target_ratio=(0.8947368421052632, 1),
     cyclic_times=1,
     step_ratio_up=0.4)
-total_epochs = 30
+total_epochs = 80
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=50,
@@ -311,7 +350,9 @@ log_config = dict(
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = None
-load_from = 'models/bevfusion_small_e4_r50.pth' #"models/bevfusion_formal40_trained_C.pth" #"models/fusion_model_retrained.pth" #"models/transfusionL_fade_e18.pth" #'checkpoints/fusion_voxel0075_R50.pth'
+load_from = "models/bevfusion_small_e4_r50.pth"
+# "work_dirs/bevtransfusion_vod_voxel_L/epoch_4.pth"
+# "models/bevfusion_model_r50.pth" "models/transfusionL_fade_e18.pth" 'checkpoints/fusion_voxel0075_R50.pth', "models/bevfusion_fade_e18_retrained.pth"
 resume_from = None
 workflow = [('train', 1)]
 gpu_ids = range(0, 8)

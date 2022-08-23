@@ -205,9 +205,10 @@ def main():
         model.pts_middle_encoder.apply(fix_bn)
         model.pts_backbone.apply(fix_bn)
         model.pts_neck.apply(fix_bn)
-        model.pts_bbox_head.heatmap_head.apply(fix_bn)
+        if model.pts_bbox_head.initialize_by_heatmap:
+            model.pts_bbox_head.heatmap_head.apply(fix_bn)
+            model.pts_bbox_head.class_encoding.apply(fix_bn)
         model.pts_bbox_head.shared_conv.apply(fix_bn)
-        model.pts_bbox_head.class_encoding.apply(fix_bn)
         model.pts_bbox_head.decoder[0].apply(fix_bn)
         model.pts_bbox_head.prediction_heads[0].apply(fix_bn)
         for name, param in model.named_parameters():
@@ -240,6 +241,7 @@ def main():
             CLASSES=datasets[0].CLASSES)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    # torch.autograd.set_detect_anomaly(True)
     train_detector(
         model,
         datasets,
@@ -248,7 +250,6 @@ def main():
         validate=(not args.no_validate),
         timestamp=timestamp,
         meta=meta)
-
 
 if __name__ == '__main__':
     main()

@@ -695,8 +695,15 @@ def get_official_eval_result(gt_annotations, dt_annotations, current_classes, pr
     overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5], #image
                             [0.5, 0.25, 0.25, 0.5, 0.25], #bev
                             [0.5, 0.25, 0.25, 0.5, 0.25]]) #3d
+
+    
     # class:  0,    1,    2,   3,   4,    5
     min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 6] = [num_overlaps, metrics, classes]
+
+    # # IOU distribution
+    # min_overlaps = np.zeros([10,3,3])
+    # for i in range(10):
+    #     min_overlaps[i,2,:] = [i/10]*3
 
     class_to_name = {
         0: 'Car',
