@@ -965,40 +965,6 @@ class TransFusionHead(nn.Module):
         
         return bev_feat
 
-    def decode_heatmap(self, heatmap, feat_flatten, feat_pos):
-        '''
-        decode heatmap, fetch corresponding feat from feat_flatten, and reshape feat pos according to new feat
-        '''
-        padding = self.nms_kernel_size // 2
-        local_max = torch.zeros_like(heatmap)
-        # equals to nms radius = voxel_size * out_size_factor * kenel_size
-        local_max_inner = F.max_pool2d(heatmap, kernel_size=self.nms_kernel_size, stride=1, padding=0)
-        local_max[:, :, padding:(-padding), padding:(-padding)] = local_max_inner
-        ## for Pedestrian & Traffic_cone in nuScenes
-        if self.test_cfg['dataset'] == 'nuScenes':
-            local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
-            local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
-        elif self.test_cfg['dataset'] in ['Waymo']:  # for Pedestrian & Cyclist in Waymo and VOD
-            local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
-            local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
-        heatmap = heatmap * (heatmap == local_max)
-        heatmap = heatmap.view(self.batch_size, heatmap.shape[1], -1)
-
-        # top #num_proposals among all classes
-        top_proposals = heatmap.contiguous().view(self.batch_size, -1).argsort(dim=-1, descending=True)[..., :self.num_proposals]
-        top_proposals_class = top_proposals // heatmap.shape[-1]
-        top_proposals_index = top_proposals % heatmap.shape[-1]
-        query_feat = feat_flatten.gather(index=top_proposals_index[:, None, :].expand(-1, feat_flatten.shape[1], -1), dim=-1)
-        self.query_labels = top_proposals_class
-
-        # add category embedding
-        one_hot = F.one_hot(top_proposals_class, num_classes=self.num_classes).permute(0, 2, 1)
-        query_cat_encoding = self.class_encoding(one_hot.float())
-        query_feat += query_cat_encoding
-        query_pos = feat_pos.gather(index=top_proposals_index[:, None, :].permute(0, 2, 1).expand(-1, -1, feat_pos.shape[-1]), dim=1)
-        
-        return query_feat, query_pos, top_proposals_index
-
     def forward_single(self, inputs, fov_inputs, bev_inputs, img_metas):
         """Forward function for CenterPoint.
 
@@ -1055,7 +1021,35 @@ class TransFusionHead(nn.Module):
             #################
             # decode heatmap
             #################
-            query_feat, query_pos, top_proposals_index = self.decode_heatmap(heatmap, lidar_feat_flatten, bev_pos)
+            # query_feat, query_pos, top_proposals_index = self.decode_heatmap(heatmap, lidar_feat_flatten, bev_pos)
+
+            padding = self.nms_kernel_size // 2
+            local_max = torch.zeros_like(heatmap)
+            # equals to nms radius = voxel_size * out_size_factor * kenel_size
+            local_max_inner = F.max_pool2d(heatmap, kernel_size=self.nms_kernel_size, stride=1, padding=0)
+            local_max[:, :, padding:(-padding), padding:(-padding)] = local_max_inner
+            ## for Pedestrian & Traffic_cone in nuScenes
+            if self.test_cfg['dataset'] == 'nuScenes':
+                local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
+                local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
+            elif self.test_cfg['dataset'] in ['Waymo']:  # for Pedestrian & Cyclist in Waymo and VOD
+                local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
+                local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
+            heatmap = heatmap * (heatmap == local_max)
+            heatmap = heatmap.view(self.batch_size, heatmap.shape[1], -1)
+
+            # top #num_proposals among all classes
+            top_proposals = heatmap.contiguous().view(self.batch_size, -1).argsort(dim=-1, descending=True)[..., :self.num_proposals]
+            top_proposals_class = top_proposals // heatmap.shape[-1]
+            top_proposals_index = top_proposals % heatmap.shape[-1]
+            query_feat = lidar_feat_flatten.gather(index=top_proposals_index[:, None, :].expand(-1, lidar_feat_flatten.shape[1], -1), dim=-1)
+            self.query_labels = top_proposals_class
+
+            # add category embedding
+            one_hot = F.one_hot(top_proposals_class, num_classes=self.num_classes).permute(0, 2, 1)
+            query_cat_encoding = self.class_encoding(one_hot.float())
+            query_feat += query_cat_encoding
+            query_pos = bev_pos.gather(index=top_proposals_index[:, None, :].permute(0, 2, 1).expand(-1, -1, bev_pos.shape[-1]), dim=1)
 
         else:
             query_feat = self.query_feat.repeat(self.batch_size, 1, 1)  # [BS, C, num_proposals]
@@ -1448,6 +1442,9 @@ class TransFusionHead(nn.Module):
         """
         if img_feats is None:
             img_feats = [[None],[None]]
+        for i, img_feat in enumerate(img_feats):
+            if img_feat==None:
+                img_feats[i]=[None]
         res = multi_apply(self.forward_single, feats, *img_feats, [img_metas])
         assert len(res) == 1, "only support one level features."
         return res
@@ -1530,6 +1527,7 @@ class TransFusionHead(nn.Module):
         boxes_dict = self.bbox_coder.decode(score, rot, dim, center, height, vel)  # decode the prediction to real world metric bbox
         bboxes_tensor = boxes_dict[0]['bboxes']
         gt_bboxes_tensor = gt_bboxes_3d.tensor.to(score.device)
+
         # each layer should do label assign seperately.
         if self.auxiliary:
             num_layer = self.num_decoder_layers if not self.fuse_img_decoder else self.num_fusion_layers*(self.fuse_bev+self.fuse_fov)
@@ -1618,6 +1616,24 @@ class TransFusionHead(nn.Module):
                     center_int = center.to(torch.int32)
                     draw_heatmap_gaussian(heatmap[gt_labels_3d[idx]], center_int, radius)
 
+        # from mmdet3d.core import LiDARInstance3DBoxes
+        # from src.vis_utils import *
+        
+        # corners = LiDARInstance3DBoxes(bboxes_tensor).corners
+        # corners -= torch.tensor([0,-25.6, 0]).cuda().reshape(1,1,3).repeat(600,8,1)
+        # corners /= 0.1 * 8
+        # plt.gca().set_xlim([0,64])
+        # plt.gca().set_ylim([0,64])
+        # show_heatmap(heatmap[0,:,:].cpu().detach(),"output/heatmaps/pred_Car", bboxes = corners.cpu().detach()[-300:,:,:])
+        # show_heatmap(heatmap[0,:,:].cpu().detach(),"output/heatmaps/pred_Car_top20", bboxes = corners.cpu().detach()[300+torch.topk(score[0,0,-300:],20).indices,:,:])
+
+        # corners = LiDARInstance3DBoxes(gt_bboxes_tensor).corners
+        # corners -= torch.tensor([0,-25.6, 0]).cuda().reshape(1,1,3).repeat(len(gt_bboxes_tensor),8,1)
+        # corners /= 0.1 * 8
+        # plt.gca().set_xlim([0,64])
+        # plt.gca().set_ylim([0,64])
+        # show_heatmap(heatmap[0,:,:].cpu().detach(),"output/heatmaps/gt_Car", bboxes = corners.cpu().detach()[:,:,:])
+
             mean_iou = ious[pos_inds].sum() / max(len(pos_inds), 1)
             return labels[None], label_weights[None], bbox_targets[None], bbox_weights[None], ious[None], int(pos_inds.shape[0]), float(mean_iou), heatmap[None]
 
@@ -1656,8 +1672,11 @@ class TransFusionHead(nn.Module):
         if self.initialize_by_heatmap:
             # compute heatmap loss
             loss_heatmap = 0
-            for dense_heatmap in preds_dict['dense_heatmap']:
-                loss_heatmap += self.loss_heatmap(clip_sigmoid(dense_heatmap), heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            if isinstance(preds_dict['dense_heatmap'], list):
+                for dense_heatmap in preds_dict['dense_heatmap']:
+                    loss_heatmap = loss_heatmap + self.loss_heatmap(clip_sigmoid(dense_heatmap), heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            else:
+                loss_heatmap = self.loss_heatmap(clip_sigmoid(preds_dict['dense_heatmap']), heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
             loss_dict['loss_heatmap'] = loss_heatmap
 
         # compute loss for each layer
@@ -1696,8 +1715,21 @@ class TransFusionHead(nn.Module):
             # layer_iou_target = ious[..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals]
             # layer_loss_iou = self.loss_iou(layer_iou, layer_iou_target, layer_bbox_weights.max(-1).values, avg_factor=max(num_pos, 1))
 
-            loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
-            loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
+            # from mmdet3d.core import LiDARInstance3DBoxes
+            # from src.vis_utils import *
+
+            # code = preds[0,:,:-1]
+            # code[:,-1] = torch.atan2(preds[0,:,-2],preds[0,:,-1])
+            # show_heatmap(heatmap.cpu().detach()[0,0,:,:], "output/heatmaps/pred_Car",bboxes=LiDARInstance3DBoxes(code).corners.cpu().detach())
+            # show_heatmap(heatmap.cpu().detach()[0,0,:,:], "output/heatmaps/pred_Car_top20",bboxes=LiDARInstance3DBoxes(code[torch.topk(layer_cls_score[:300,0],20).indices,:]).corners.cpu().detach())
+            # code = layer_bbox_targets[0,:,:-1]
+            # code[:,-1] = torch.atan2(layer_bbox_targets[0,:,-2],layer_bbox_targets[0,:,-1])
+            # show_heatmap(heatmap.cpu().detach()[0,0,:,:], "output/heatmaps/gt_Car",bboxes=LiDARInstance3DBoxes(code).corners.cpu().detach())
+        
+
+
+            # loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
+            # loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
             # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
 
         loss_dict[f'matched_ious'] = layer_loss_cls.new_tensor(matched_ious)
