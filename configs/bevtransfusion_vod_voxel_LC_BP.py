@@ -106,7 +106,7 @@ data = dict(
     # samples_per_gpu=1,
     # workers_per_gpu=1,
 
-    samples_per_gpu=3,
+    samples_per_gpu=2,
     workers_per_gpu=4,
     train=dict(
         type='RepeatDataset',
@@ -253,9 +253,9 @@ model = dict(
         type='TransFusionHead',
         # img fusion
         fuse_img=True,
-        img_guidance = False,
+        img_guidance = True,
         order=['fov', 'bev'],
-        fuse_fov=False,
+        fuse_fov=True,
         fuse_bev=True,
         fuse_bev_collapse=False,
         # fuse_img_decoder=False,

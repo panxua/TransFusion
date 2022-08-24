@@ -4,12 +4,12 @@ import os
 
 def show_heatmap(hm,filepath="work_dirs/debugger/hm.png", points=None, bboxes=None):
     plt.imshow(hm,cmap=plt.cm.jet)
-    plt.axis('off')
+    # plt.axis('off')
     if points is not None:
         for x,y in points:
             plt.plot(x,y,"ko", markersize=2)
     if bboxes is not None:
-        plot_bboxes(bboxes, "black", 0.1)
+        plot_bboxes(bboxes, "black", 0.5)
     plt.savefig(filepath)
     plt.close()
 

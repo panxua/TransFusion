@@ -174,7 +174,7 @@ model = dict(
             pc_range=point_cloud_range[:2],
             voxel_size=voxel_size[:2],
             out_size_factor=out_size_factor,
-            post_center_range=[-80, -80, -10.0, 80, 80, 10.0],
+            post_center_range=point_cloud_range,
             score_threshold=0.0,
             code_size=8,
         ),
