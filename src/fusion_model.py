@@ -1,8 +1,8 @@
 import torch
 # models/resnet50.pth "work_dirs/bevtransfusion_vod_voxel_C/300obj_fixed/epoch_18.pth" #"work_dirs/transfusion_vod_voxel_LC/trained/epoch_14.pth"
 img_file = "models/resnet50.pth"  #"work_dirs/transfusion_vod_C/LSSFPN_e23/epoch_23.pth"
-pts_file = "models/transfusionL_fade_e18.pth"
-output_file = "models/bevfusion_formal40.pth"
+pts_file = "models/transfusion_l_epoch_5.pth"
+output_file = "models/baseline_L.pth"
 
 img = torch.load(img_file, map_location='cpu')
 pts = torch.load(pts_file, map_location='cpu')

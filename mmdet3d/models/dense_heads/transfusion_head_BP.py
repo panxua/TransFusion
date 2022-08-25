@@ -1032,7 +1032,7 @@ class TransFusionHead(nn.Module):
             if self.test_cfg['dataset'] == 'nuScenes':
                 local_max[:, 8, ] = F.max_pool2d(heatmap[:, 8], kernel_size=1, stride=1, padding=0)
                 local_max[:, 9, ] = F.max_pool2d(heatmap[:, 9], kernel_size=1, stride=1, padding=0)
-            elif self.test_cfg['dataset'] in ['Waymo']:  # for Pedestrian & Cyclist in Waymo and VOD
+            elif self.test_cfg['dataset'] in ['Waymo','VODDataset']:  # for Pedestrian & Cyclist in Waymo and VOD
                 local_max[:, 1, ] = F.max_pool2d(heatmap[:, 1], kernel_size=1, stride=1, padding=0)
                 local_max[:, 2, ] = F.max_pool2d(heatmap[:, 2], kernel_size=1, stride=1, padding=0)
             heatmap = heatmap * (heatmap == local_max)
@@ -1815,7 +1815,14 @@ class TransFusionHead(nn.Module):
                     keep_mask = keep_mask.bool()
                     ret = dict(bboxes=boxes3d[keep_mask], scores=scores[keep_mask], labels=labels[keep_mask])
                 else:  # no nms
-                    ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
+                    if 'post_maxsize' in self.test_cfg and self.test_cfg['post_maxsize']:
+                        if self.test_cfg['post_maxsize'] < len(boxes3d):
+                            topk_ind = torch.topk(scores, self.test_cfg['post_maxsize']).indices
+                    else:
+                        topk_ind = range(len(boxes3d))
+
+                    ret = dict(bboxes=boxes3d[topk_ind], scores=scores[topk_ind], labels=labels[topk_ind])
+
                 ret_layer.append(ret)
             rets.append(ret_layer)
         assert len(rets) == 1

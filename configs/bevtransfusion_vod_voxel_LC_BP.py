@@ -324,7 +324,9 @@ model = dict(
             pc_range=point_cloud_range[0:2],
             voxel_size=voxel_size[:2],
             nms_type=None,
+            post_maxsize=100,
         )))
+
 optimizer = dict(type='AdamW', lr=0.0001, weight_decay=0.01)  # for 8gpu * 2sample_per_gpu, #0.0001
 optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
 lr_config = dict(
@@ -346,7 +348,8 @@ log_config = dict(
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = None
-load_from = "/home/xuanyu/radarfusion/TransFusion/models/bevfusion_small_e4_r50.pth"
+load_from = "models/baseline_L.pth"
+#"/home/xuanyu/radarfusion/TransFusion/models/bevfusion_small_e4_r50.pth"
 # load_from = "models/bevfusion_formal40_trained_C.pth"
 # "work_dirs/bevtransfusion_vod_voxel_L/epoch_4.pth"
 # "models/bevfusion_model_r50.pth" "models/transfusionL_fade_e18.pth" 'checkpoints/fusion_voxel0075_R50.pth', "models/bevfusion_fade_e18_retrained.pth"
