@@ -1470,7 +1470,12 @@ class TransFusionHead(nn.Module):
                     keep_mask = keep_mask.bool()
                     ret = dict(bboxes=boxes3d[keep_mask], scores=scores[keep_mask], labels=labels[keep_mask])
                 else:  # no nms
-                    ret = dict(bboxes=boxes3d, scores=scores, labels=labels)
+                    if 'post_maxsize' in self.test_cfg and self.test_cfg['post_maxsize']:
+                        if self.test_cfg['post_maxsize'] < len(boxes3d):
+                            topk_ind = torch.topk(scores, self.test_cfg['post_maxsize']).indices
+                    else:
+                        topk_ind = range(len(boxes3d))
+                        
                 ret_layer.append(ret)
             rets.append(ret_layer)
         assert len(rets) == 1
