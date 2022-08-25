@@ -1,10 +1,11 @@
 point_cloud_range = [0, -25.6, -3, 51.2, 25.6, 2]
 class_names = ['Car', 'Pedestrian', 'Cyclist']
+# TODO change to 0.125
 voxel_size = [0.1, 0.1, 0.15]
 out_size_factor = 8
 evaluation = dict(interval=1)
 dataset_type = 'VODDataset'
-data_root = 'data/view_of_delft_PUBLIC/radar'
+data_root = '/mnt/12T/fangqiang/view_of_delft_PUBLIC/radar'
 input_modality = dict(
     use_lidar=False,
     use_camera=True,
@@ -101,7 +102,10 @@ test_pipeline = [
 ]
 data = dict(
     samples_per_gpu=2,
-    workers_per_gpu=2,
+    workers_per_gpu=4,
+
+    # samples_per_gpu=4,
+    # workers_per_gpu=4,
     train=dict(
         type='RepeatDataset',
         times=1,
@@ -119,8 +123,8 @@ data = dict(
     val=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + '/vod_radar_infos_val.pkl',
-        split = "training",
+        ann_file=data_root + '/vod_radar_infos_test.pkl',
+        split = "testing",
         # load_interval=1,
         pipeline=test_pipeline,
         classes=class_names,
@@ -130,8 +134,8 @@ data = dict(
     test=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + '/vod_radar_infos_val.pkl',
-        split = "training",
+        ann_file=data_root + '/vod_radar_infos_test.pkl',
+        split = "testing",
         # load_interval=1,
         pipeline=test_pipeline,
         classes=class_names,
@@ -172,14 +176,14 @@ model = dict(
         type='GeneralizedLSSFPN',
         in_channels=[256, 512, 1024, 2048],
         out_channels=256,   
-        num_outs=5,
+        num_outs=3,
         norm_cfg=dict(type="BN2d",requires_grad=True),
         act_cfg=dict(type="ReLU",inplace=True),
         upsample_cfg=dict(mode="bilinear",align_corners=False)),
     img_vtransform=dict(
         type="DepthLSSTransform",
         in_channels=256,
-        out_channels=64, #original 80
+        out_channels=256, #original 80
         image_size=img_scale,
         feature_size= (img_scale[0]//8,img_scale[1]//8),
         xbound=[0, 51.2, 0.4],
@@ -248,11 +252,12 @@ model = dict(
         type='TransFusionHead',
         # img fusion
         fuse_img=True,
+        fuse_fov=False,
         fuse_bev=True,
         fuse_bev_collapse=False,
         # fuse_img_decoder=False,
         num_views=1,
-        in_channels_img=64, # modified 256
+        in_channels_img=256, # modified 256
         # same as lidar only
         num_proposals=300,
         auxiliary=True,
@@ -338,11 +343,11 @@ log_config = dict(
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = None
-load_from = "models/bevfusion_small_e4_r50.pth"
+load_from = "models/bevfusion_formal_trained_C.pth"
 # "work_dirs/bevtransfusion_vod_voxel_L/epoch_4.pth"
 # "models/bevfusion_model_r50.pth" "models/transfusionL_fade_e18.pth" 'checkpoints/fusion_voxel0075_R50.pth', "models/bevfusion_fade_e18_retrained.pth"
 resume_from = None
 workflow = [('train', 1)]
-gpu_ids = range(0, 8)
+gpu_ids = range(0, 2)
 freeze_lidar_components = True
 find_unused_parameters = True

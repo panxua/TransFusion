@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-from mmcv.ops import diff_iou_rotated_3d
 from torch import nn as nn
 
 from mmdet.models.losses.utils import weighted_loss

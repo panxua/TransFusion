@@ -11,6 +11,7 @@ from .votenet import VoteNet
 from .voxelnet import VoxelNet
 from .transfusion import TransFusionDetector
 from .bev_transfusion import BEVTransFusionDetector
+from .rcfusion import RCFusion
 
 __all__ = [
     'Base3DDetector',
@@ -26,5 +27,6 @@ __all__ = [
     'SSD3DNet',
     'ImVoteNet',
     'TransFusionDetector',
-    'BEVTransFusionDetector'
+    'BEVTransFusionDetector',
+    'RCFusion'
 ]
