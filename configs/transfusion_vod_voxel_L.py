@@ -4,7 +4,7 @@ voxel_size = [0.1, 0.1, 0.15]
 out_size_factor = 8
 evaluation = dict(interval=1)
 dataset_type = 'VODDataset'
-data_root = 'data/view_of_delft_PUBLIC/radar'
+data_root = '/mnt/12T/fangqiang/view_of_delft_PUBLIC/radar'
 input_modality = dict(
     use_lidar=False,
     use_camera=False,

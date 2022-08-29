@@ -12,6 +12,7 @@ from mmcv.utils import Registry
 VTRANSFORMS = Registry("vtransforms")
 FUSERS = Registry("fusers")
 
+
 def build_backbone(cfg):
     """Build backbone."""
     return build(cfg, BACKBONES)

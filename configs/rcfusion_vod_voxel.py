@@ -1,8 +1,7 @@
 point_cloud_range = [0, -25.6, -3, 51.2, 25.6, 2]
 class_names = ['Car', 'Pedestrian', 'Cyclist']
-# TODO change to 0.125
 voxel_size = [0.1, 0.1, 0.15]
-out_size_factor = 8
+out_size_factor = 4
 evaluation = dict(interval=1)
 dataset_type = 'VODDataset'
 data_root = '/mnt/12T/fangqiang/view_of_delft_PUBLIC/radar'
@@ -21,8 +20,7 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=7,
-        use_dim=[0, 1, 2, 3, 5],
-        # use_dim=[0, 1, 2, 3, 5],
+        use_dim=[0, 1, 2, 3, 5]
     ),
     # dict(
     #     type='LoadPointsFromMultiSweeps',
@@ -31,19 +29,21 @@ train_pipeline = [
     # ),
     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
     dict(type='LoadMultiViewImageFromFiles'),
-    dict(type='ObjectSample',
-        db_sampler=dict(
-            data_root=data_root,
-            info_path=data_root + '/vod_radar_dbinfos_train.pkl',
-            rate=1.0,
-            prepare=dict(
-                filter_by_difficulty=[-1],
-                filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
-            classes=class_names,
-            sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
-            points_loader=dict(
-                type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
-        ),
+    # dict(type='ObjectSample',
+    #     db_sampler=dict(
+    #         data_root=data_root,
+    #         info_path=data_root + '/vod_radar_dbinfos_train.pkl',
+    #         rate=1.0,
+    #         prepare=dict(
+    #             filter_by_difficulty=[-1],
+    #             filter_by_min_points=dict(Car=5, Pedestrian=5, Cyclist=5)),
+    #         classes=class_names,
+    #         sample_groups=dict(Car=15, Pedestrian=10, Cyclist=10),
+    #         points_loader=dict(
+    #             type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4])),
+    #     #sample_2d = True
+    #     ),
+
     # dict(
     #     type='GlobalRotScaleTrans',
     #     rot_range=[-0.3925 * 2, 0.3925 * 2],
@@ -53,7 +53,8 @@ train_pipeline = [
     #     type='RandomFlip3D',
     #     sync_2d=True,
     #     flip_ratio_bev_horizontal=0.5,
-    #     flip_ratio_bev_vertical=0.5),
+    #     #flip_ratio_bev_vertical=0.5),
+    # ),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
@@ -101,8 +102,8 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=2,
-    workers_per_gpu=4,
+    samples_per_gpu=3,
+    workers_per_gpu=3,
 
     # samples_per_gpu=4,
     # workers_per_gpu=4,
@@ -123,8 +124,8 @@ data = dict(
     val=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + '/vod_radar_infos_test.pkl',
-        split = "testing",
+        ann_file=data_root + '/vod_radar_infos_val.pkl',
+        split = "training",
         # load_interval=1,
         pipeline=test_pipeline,
         classes=class_names,
@@ -134,8 +135,8 @@ data = dict(
     test=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + '/vod_radar_infos_test.pkl',
-        split = "testing",
+        ann_file=data_root + '/vod_radar_infos_val.pkl',
+        split = "training",
         # load_interval=1,
         pipeline=test_pipeline,
         classes=class_names,
@@ -154,9 +155,13 @@ data = dict(
     #     test_mode=True,
     #     box_type_3d='LiDAR'))
 model = dict(
-    type='BEVTransFusionDetector',
+    type='RCFusion',
+    freeze_img_backbone=False,
+    freeze_img_neck=False,
     freeze_img=False,
-    freeze_bev_encoder=False,
+    pretrained = dict(
+        img_backbone ='checkpoints/resnet50.pth',
+    ),
     # img_backbone=dict(
     #     type='DLASeg',
     #     num_layers=34,
@@ -171,7 +176,8 @@ model = dict(
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
-        style='pytorch'),    
+        style='pytorch',
+    ),
     img_neck=dict(
         type='GeneralizedLSSFPN',
         in_channels=[256, 512, 1024, 2048],
@@ -190,16 +196,16 @@ model = dict(
         ybound=[-25.6, 25.6, 0.4],
         zbound=[-3.0, 2.0, 5.0], #[-10,10,20]
         dbound=[1.0, 60.0, 0.5],
-        downsample=2),
-    # img_bev_encoder_backbone=dict(
-    #     type='ResNetForBEVDet',
-    #     numC_input=numC_Trans #256
-    # ),
-    # img_bev_encoder_neck=dict(
-    #     type='FPN_LSS',
-    #     in_channels=numC_Trans*8+numC_Trans*2, #2560
-    #     out_channels=256
-    # ),
+        downsample=1),
+    img_bev_encoder_backbone=dict(
+        type='ResNetForBEVDet',
+        numC_input=numC_Trans #256
+    ),
+    img_bev_encoder_neck=dict(
+        type='FPN_LSS',
+        in_channels=numC_Trans*8+numC_Trans*2, #2560
+        out_channels=256
+    ),
     pts_voxel_layer=dict(
         max_num_points=5, #10
         voxel_size=voxel_size,
@@ -228,13 +234,14 @@ model = dict(
         # sparse_shape=[41, 1504, 1504],
         #sparse_shape=[41, 1440, 1440],
         output_channels=128,
+        base_channels=32,
         order=('conv', 'norm', 'act'),
-        encoder_channels=((16, 16, 32), (32, 32, 64), (64, 64, 128), (128, 128)),
-        encoder_paddings=((0, 0, 1), (0, 0, 1), (0, 0, [0, 1, 1]), (0, 0)),
+        encoder_channels=((32, 32, 64), (64, 64, 128), (128, 128)),
+        encoder_paddings=((0, 0, 1), (0, 0, [0, 1, 1]), (0, 0)),
         block_type='basicblock'),
     pts_backbone=dict(
         type='SECOND',
-        in_channels=256,
+        in_channels=512,
         out_channels=[128, 256],
         layer_nums=[5, 5],
         layer_strides=[1, 2],
@@ -249,14 +256,9 @@ model = dict(
         upsample_cfg=dict(type='deconv', bias=False),
         use_conv_for_no_stride=True),
     pts_bbox_head=dict(
-        type='TransFusionHead',
+        type='RCFusionHead',
         # img fusion
         fuse_img=True,
-        fuse_fov=False,
-        fuse_bev=True,
-        fuse_bev_collapse=False,
-        # fuse_img_decoder=False,
-        num_views=1,
         in_channels_img=256, # modified 256
         # same as lidar only
         num_proposals=300,
@@ -288,9 +290,9 @@ model = dict(
             # code_size=10,
         ),
         loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0),
-        # loss_iou=dict(type='CrossEntropyLoss', use_sigmoid=True, reduction='mean', loss_weight=0.0),
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
         loss_heatmap=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
+        loss_consistency=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
     ),
     train_cfg=dict(
         pts=dict(
@@ -320,21 +322,30 @@ model = dict(
             out_size_factor=out_size_factor,
             pc_range=point_cloud_range[0:2],
             voxel_size=voxel_size[:2],
-            nms_type=None,
+            nms_type=None
         )))
 optimizer = dict(type='AdamW', lr=0.0001, weight_decay=0.01)  # for 8gpu * 2sample_per_gpu, #0.0001
 optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
+# Set customized learning policy
 lr_config = dict(
-    policy='cyclic',
-    target_ratio=(10, 0.0001),
-    cyclic_times=1,
-    step_ratio_up=0.4)
-momentum_config = dict(
-    policy='cyclic',
-    target_ratio=(0.8947368421052632, 1),
-    cyclic_times=1,
-    step_ratio_up=0.4)
-total_epochs = 80
+    policy='step',
+    warmup='linear',
+    warmup_iters=1000,
+    warmup_ratio=0.01,
+    step=[10,20,30],
+    gamma=0.5)
+# lr_config = dict(
+#     policy='cyclic',
+#     target_ratio=(10, 0.0001),
+#     cyclic_times=1,
+#     step_ratio_up=0.4)
+
+# momentum_config = dict(
+#     policy='cyclic',
+#     target_ratio=(0.8947368421052632, 1),
+#     cyclic_times=1,
+#     step_ratio_up=0.4)
+total_epochs = 30
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=50,
@@ -342,12 +353,12 @@ log_config = dict(
            dict(type='TensorboardLoggerHook')])
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = None
-load_from = "models/bevfusion_formal_trained_C.pth"
+work_dir = "work_dirs/rcfusion_vod_voxel_new"
+load_from = None #'checkpoints/resnet50.pth' # "models/bevfusion_formal_trained_C.pth"
 # "work_dirs/bevtransfusion_vod_voxel_L/epoch_4.pth"
 # "models/bevfusion_model_r50.pth" "models/transfusionL_fade_e18.pth" 'checkpoints/fusion_voxel0075_R50.pth', "models/bevfusion_fade_e18_retrained.pth"
 resume_from = None
 workflow = [('train', 1)]
 gpu_ids = range(0, 2)
-freeze_lidar_components = True
+freeze_lidar_components = False
 find_unused_parameters = True

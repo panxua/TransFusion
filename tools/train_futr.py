@@ -5,6 +5,7 @@ import copy
 import logging
 import mmcv
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import time
 import torch
 import warnings
@@ -21,8 +22,8 @@ from mmdet.apis import set_random_seed, train_detector
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
-    #parser.add_argument('--config', default = 'configs/rcfusion_vod_voxel.py', help='train config file path')
-    parser.add_argument('config')
+    parser.add_argument('--config', default = 'plugin/futr3d/configs/cam_radar/res101_radar_vod.py', help='train config file path')
+    #parser.add_argument('config')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
         '--resume-from', help='the checkpoint file to resume from')

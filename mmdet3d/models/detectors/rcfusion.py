@@ -18,17 +18,19 @@ from .transfusion import TransFusionDetector
 
 
 @DETECTORS.register_module()
-class BEVTransFusionDetector(TransFusionDetector):
+class RCFusion(TransFusionDetector):
     def __init__(self, 
-                 freeze_bev_encoder=False,
+                 freeze_img_backbone=False,
+                 freeze_img_neck=False,
                  img_vtransform=None,
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
                  **kwargs):
-        self.freeze_img = kwargs.get('freeze_img', True)
-        self.freeze_bev_encoder = self.freeze_img and freeze_bev_encoder
-        
-        super(BEVTransFusionDetector, self).__init__(**kwargs)
+
+        self.freeze_img_backbone = freeze_img_backbone
+        self.freeze_img_neck = freeze_img_neck
+
+        super(RCFusion, self).__init__(**kwargs)
 
         if img_vtransform:
             self.img_vtransform = builder.build_vtransform(
@@ -44,38 +46,25 @@ class BEVTransFusionDetector(TransFusionDetector):
 
     def init_weights(self, pretrained=None):
         """Initialize model weights."""
-        super(BEVTransFusionDetector, self).init_weights(pretrained)
+        super(RCFusion, self).init_weights(pretrained)
+        if self.with_img_backbone:
+            if not pretrained==None: 
+                self.img_backbone.init_weights(pretrained=pretrained['img_backbone'])
+
         if self.with_img_vtransform:
             self.img_vtransform.init_weights()
-        # if self.with_img_bev_encoder_backbone:
-        #     self.img_bev_encoder_backbone.init_weights()
-        # if self.with_img_bev_encoder_neck:
-        #     if isinstance(self.img_bev_encoder_neck, nn.Sequential):
-        #         for m in self.img_bev_encoder_neck:
-        #             m.init_weights()
-        #     else:
-        #         self.img_bev_encoder_neck.init_weights()
-        if self.freeze_img:
+            
+        if self.freeze_img_backbone:
             if self.with_img_backbone:
                 for param in self.img_backbone.parameters():
                     param.requires_grad = False
+
+        if self.freeze_img_neck:
             if self.with_img_neck:
                 for param in self.img_neck.parameters():
                     param.requires_grad = False
 
-        if self.freeze_bev_encoder:
-            if self.with_img_vtransform:
-                for param in self.img_vtransform.parameters():
-                    param.requires_grad = False
 
-            if self.with_img_bev_encoder_backbone:
-                for param in self.img_bev_encoder_backbone.parameters():
-                    param.requires_grad = False
-
-            if self.with_img_bev_encoder_neck:
-                for param in self.img_bev_encoder_neck.parameters():
-                    param.requires_grad = False
-        
     def extract_img_feat(self, img, points, img_metas):
         """Extract features of images."""
         fov_feats, bev_feats = None, None
@@ -95,9 +84,8 @@ class BEVTransFusionDetector(TransFusionDetector):
             return None
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
-        fov_feats = img_feats
-
-        # project to BEV
+        
+        # project perspective features to BEV
         if self.with_img_vtransform:
             if not isinstance(img_feats,torch.Tensor):
                 img_feats = img_feats[0]
@@ -110,7 +98,7 @@ class BEVTransFusionDetector(TransFusionDetector):
         if self.with_img_bev_encoder_neck:
             img_feats = self.img_bev_encoder_neck(img_feats)
         bev_feats = img_feats
-        return [fov_feats, [bev_feats]]
+        return [None, [bev_feats]]
 
     def transform_img_feat(self, pts, img_feats, img_metas):
         assert 'flip' not in img_metas[0].keys() or not img_metas[0]['flip'], "not implemented"
@@ -172,6 +160,33 @@ class BEVTransFusionDetector(TransFusionDetector):
         pts_feats = self.extract_pts_feat(points, img_feats, img_metas)
         return (img_feats, pts_feats)
 
+    def forward_pts_train(self,
+                          pts_feats,
+                          img_feats,
+                          gt_bboxes_3d,
+                          gt_labels_3d,
+                          img_metas,
+                          gt_bboxes_ignore=None):
+        """Forward function for point cloud branch.
+
+        Args:
+            pts_feats (list[torch.Tensor]): Features of point cloud branch
+            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`]): Ground truth
+                boxes for each sample.
+            gt_labels_3d (list[torch.Tensor]): Ground truth labels for
+                boxes of each sampole
+            img_metas (list[dict]): Meta information of samples.
+            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
+                boxes to be ignored. Defaults to None.
+
+        Returns:
+            dict: Losses of each branch.
+        """
+        outs = self.pts_bbox_head(pts_feats, img_feats, img_metas)
+        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+        losses = self.pts_bbox_head.loss(*loss_inputs)
+        return losses
+        
     def forward_img_train(self,
                           img_feats,
                           gt_bboxes_3d,

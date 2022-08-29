@@ -30,20 +30,20 @@ train_pipeline = [
     #          points_loader=dict(
     #              type='LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=[0, 1, 2, 3, 4]))
     #      ),
-    dict(
-        type='RandomFlip3D',
-        sync_2d=False,
-        flip_ratio_bev_horizontal=0.5),
     # dict(
     #     type='RandomFlip3D',
     #     sync_2d=False,
-    #     flip_ratio_bev_horizontal=0.5,
-    #     flip_ratio_bev_vertical=0.5),
-    dict(
-        type='GlobalRotScaleTrans',
-        rot_range=[-0.78539816, 0.78539816],
-        scale_ratio_range=[0.95, 1.05],
-    ),
+    #     flip_ratio_bev_horizontal=0.5),
+    # # dict(
+    # #     type='RandomFlip3D',
+    # #     sync_2d=False,
+    # #     flip_ratio_bev_horizontal=0.5,
+    # #     flip_ratio_bev_vertical=0.5),
+    # dict(
+    #     type='GlobalRotScaleTrans',
+    #     rot_range=[-0.78539816, 0.78539816],
+    #     scale_ratio_range=[0.95, 1.05],
+    # ),
     dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='PointShuffle'),
@@ -229,7 +229,7 @@ log_config = dict(
            dict(type='TensorboardLoggerHook')])
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = None
+work_dir = "work_dirs/bevtransfusion_noaug_L/"
 load_from =  None
 resume_from = None #'work_dirs/bevtransfusion_vod_voxel_L/epoch_15.pth', #'work_dirs/bevtransfusion_vod_voxel_L/small/epoch_5.pth'
 workflow = [('train', 1)]

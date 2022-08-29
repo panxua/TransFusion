@@ -118,6 +118,7 @@ exps/
 *~
 work_dirs/
 output/
+checkpoints/
 
 # Pytorch
 *.pth
@@ -129,3 +130,4 @@ output/
 /data/sunrgbd/OFFICIAL_SUNRGBD/
 *.obj
 *.ply
+attachment

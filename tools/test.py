@@ -19,8 +19,9 @@ from mmdet.datasets import replace_ImageToTensor
 def parse_args():
     parser = argparse.ArgumentParser(
         description='MMDet test (and eval) a model')
-    parser.add_argument('config', help='test config file path')
-    parser.add_argument('checkpoint', help='checkpoint file')
+    parser.add_argument('--config', default = 'configs/rcfusion_vod_voxel.py', help='train config file path')
+    #parser.add_argument('config', help='test config file path')
+    parser.add_argument('--checkpoint', default = 'work_dirs/rcfusion_vod_voxel_post_300/epoch_6.pth', help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
     parser.add_argument(
         '--fuse-conv-bn',

@@ -280,7 +280,8 @@ model = dict(
             out_size_factor=out_size_factor,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             # code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2],
-            point_cloud_range=point_cloud_range)),
+            point_cloud_range=point_cloud_range)
+        ),
     test_cfg=dict(
         pts=dict(
             dataset='VODDataset',

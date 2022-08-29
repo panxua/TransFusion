@@ -1728,8 +1728,8 @@ class TransFusionHead(nn.Module):
         
 
 
-            # loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
-            # loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
+            loss_dict[f'{prefix}_loss_cls'] = layer_loss_cls
+            loss_dict[f'{prefix}_loss_bbox'] = layer_loss_bbox
             # loss_dict[f'{prefix}_loss_iou'] = layer_loss_iou
 
         loss_dict[f'matched_ious'] = layer_loss_cls.new_tensor(matched_ious)
