@@ -1,6 +1,6 @@
 point_cloud_range = [0, -25.6, -3, 51.2, 25.6, 2]
 class_names = ['Car', 'Pedestrian', 'Cyclist']
-voxel_size = [0.1, 0.1, 0.15]
+voxel_size = [0.1, 0.1, 0.2]
 out_size_factor = 4
 evaluation = dict(interval=1)
 dataset_type = 'VODDataset'
@@ -207,7 +207,6 @@ model = dict(
         max_voxels= 150000, #(120000, 160000),
         point_cloud_range=point_cloud_range),
 
-
     pts_voxel_encoder=dict(
         type='HardVFE',
         in_channels=5 + 256,
@@ -220,20 +219,20 @@ model = dict(
         point_cloud_range=point_cloud_range,
     ),
     pts_middle_encoder=dict(
-        type='SparseEncoder',
+        type='SparseEncoderStride',
         in_channels=64,
-        sparse_shape = [41, 512, 512], #modified
-        # sparse_shape=[41, 1504, 1504],
-        #sparse_shape=[41, 1440, 1440],
+        sparse_shape = [25, 512, 512], 
         output_channels=128,
-        base_channels=32,
+        base_channels=16,
         order=('conv', 'norm', 'act'),
-        encoder_channels=((32, 32, 64), (64, 64, 128), (128, 128)),
-        encoder_paddings=((0, 0, 1), (0, 0, [0, 1, 1]), (0, 0)),
+        encoder_channels=((16, 16, 32), (32, 32, 64), (64, 64, 128), (128, 128)),
+        encoder_paddings=((0, 0, 1), (0, 0, 1), (0, 0, [0, 1, 1]), (0, 0)),
+        # different axes, except for the last block
+        strides = ((2, 2, 2), (2, 2, 2), (1, 1, 1)),
         block_type='basicblock'),
     pts_backbone=dict(
         type='SECOND',
-        in_channels=512,
+        in_channels=256, # 128 * 2
         out_channels=[128, 256],
         layer_nums=[5, 5],
         layer_strides=[1, 2],
@@ -242,7 +241,7 @@ model = dict(
     pts_neck=dict(
         type='SECONDFPN',
         in_channels=[128, 256],
-        out_channels=[256, 256],
+        out_channels=[128, 128],
         upsample_strides=[1, 2],
         norm_cfg=dict(type='BN', eps=0.001, momentum=0.01),
         upsample_cfg=dict(type='deconv', bias=False),
@@ -255,7 +254,7 @@ model = dict(
         # same as lidar only
         num_proposals=300,
         auxiliary=True,
-        in_channels=256 * 2,
+        in_channels_pts=256,
         hidden_channel=128,
         out_size_factor_img=4,
         num_classes=len(class_names),
@@ -281,10 +280,10 @@ model = dict(
             code_size=8,
             # code_size=10,
         ),
-        loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0),
+        loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0), # alpha=0.25
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
         loss_heatmap=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
-        loss_consistency=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=0.25),
+        loss_consistency=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
     ),
     train_cfg=dict(
         pts=dict(
@@ -300,7 +299,7 @@ model = dict(
             gaussian_overlap=0.1,
             min_radius=2,
             # grid_size=[1504, 1504, 40],
-            grid_size= [512, 512, 40], # [1504, 1504, 40], #[1440, 1440, 40],  # [x_len, y_len, 1]
+            grid_size= [512, 512, 25], # [1504, 1504, 40], #[1440, 1440, 40],  # [x_len, y_len, 1]
             voxel_size=voxel_size,
             out_size_factor=out_size_factor,
             code_weights=[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -310,12 +309,12 @@ model = dict(
         pts=dict(
             dataset='VODDataset',
             # grid_size=[1504, 1504, 40],
-            grid_size=[512, 512, 40], #[1440, 1440, 40],
+            grid_size=[512, 512, 25], #[1440, 1440, 40],
             out_size_factor=out_size_factor,
             pc_range=point_cloud_range[0:2],
             voxel_size=voxel_size[:2],
             nms_type=None,
-            post_maxsize = 100,
+            post_maxsize = 300,
         )))
 optimizer = dict(type='AdamW', lr=0.0001, weight_decay=0.01)  # for 8gpu * 2sample_per_gpu, #0.0001
 optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
@@ -323,9 +322,9 @@ optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=100,
+    warmup_iters=500,
     warmup_ratio=0.01,
-    step=[5,10,15],
+    step=[3,6,10],
     gamma=0.5)
 # lr_config = dict(
 #     policy='cyclic',
@@ -338,7 +337,7 @@ lr_config = dict(
 #     target_ratio=(0.8947368421052632, 1),
 #     cyclic_times=1,
 #     step_ratio_up=0.4)
-total_epochs = 30
+total_epochs = 20
 checkpoint_config = dict(interval=1)
 log_config = dict(
     interval=50,

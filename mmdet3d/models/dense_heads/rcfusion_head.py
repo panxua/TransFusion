@@ -33,7 +33,7 @@ class RCFusionHead(nn.Module):
                  out_size_factor_img=4,
                  num_proposals=128,
                  auxiliary=True,
-                 in_channels=128 * 3,
+                 in_channels_pts=128 * 3,
                  hidden_channel=128,
                  num_classes=4,
                  # config for Transformer
@@ -71,7 +71,7 @@ class RCFusionHead(nn.Module):
         self.num_classes = num_classes
         self.num_proposals = num_proposals
         self.auxiliary = auxiliary
-        self.in_channels = in_channels
+        self.in_channels_pts = in_channels_pts
         self.num_heads = num_heads
         self.num_decoder_layers = num_decoder_layers
         self.num_fusion_layers = num_fusion_layers
@@ -100,7 +100,7 @@ class RCFusionHead(nn.Module):
         # a shared convolution for point cloud features
         self.shared_conv = build_conv_layer(
             dict(type='Conv2d'),
-            in_channels,
+            in_channels_pts,
             int(hidden_channel),
             kernel_size=3,
             padding=1,
@@ -146,10 +146,6 @@ class RCFusionHead(nn.Module):
             )
             self.shared_conv_img = nn.Sequential(*conv_img_layers)
        
-        # initilize layers after fusion
-        if fuse_img:
-            hidden_channel = hidden_channel * 2
-
         layers = []
         layers.append(ConvModule(
             hidden_channel,
@@ -173,7 +169,7 @@ class RCFusionHead(nn.Module):
         # fuser layer
         fuse_layers = []
         fuse_layers.append(ConvModule(
-            hidden_channel,
+            hidden_channel*2,
             hidden_channel,
             kernel_size=3,
             padding=1,
@@ -332,8 +328,6 @@ class RCFusionHead(nn.Module):
         if self.fuse_img:
             radar_heatmap = self.heatmap_head_radar(lidar_feat)
             img_heatmap = self.heatmap_head_img(img_feat)
-
-
 
         #################################
         # initialize with heatmap
@@ -626,12 +620,14 @@ class RCFusionHead(nn.Module):
 
         # compute response consistency loss
         if self.fuse_img:
-        
+            pos_weights = heatmap.new_zeros(heatmap.size())
+            pos_weights[heatmap>self.pos_thres] = 1.0
             image_heatmap = clip_sigmoid(preds_dict['image_heatmap'])
             radar_heatmap = clip_sigmoid(preds_dict['radar_heatmap'])
             loss_consistency = 0
-            loss_consistency =  self.loss_consistency(image_heatmap, heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
-            loss_consistency +=  self.loss_consistency(radar_heatmap, heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            loss_consistency += self.loss_consistency(radar_heatmap, heatmap, pos_weights, avg_factor=max(pos_weights.eq(1).float().sum().item(), 1))
+            loss_consistency += self.loss_consistency(image_heatmap, heatmap, pos_weights, avg_factor=max(pos_weights.eq(1).float().sum().item(), 1))
+            # loss_consistency += self.loss_consistency(image_heatmap, heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
             # radar_tp = torch.logical_and(heatmap>self.pos_thres, radar_heatmap.detach()>self.pos_thres)
             # con_weights = heatmap.new_zeros(heatmap.size())
             # con_weights[radar_tp] = 1.0
