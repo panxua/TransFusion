@@ -162,12 +162,7 @@ model = dict(
     pretrained = dict(
         img_backbone ='checkpoints/resnet50.pth',
     ),
-    # img_backbone=dict(
-    #     type='DLASeg',
-    #     num_layers=34,
-    #     heads={},
-    #     head_convs=-1,
-    #     ),
+   
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -188,7 +183,7 @@ model = dict(
         upsample_cfg=dict(mode="bilinear",align_corners=False)),
     img_vtransform=dict(
         type="DepthLSSTransform",
-        in_channels=256,
+        in_channels=256 + 3,
         out_channels=256, #original 80
         image_size=img_scale,
         feature_size= (img_scale[0]//8,img_scale[1]//8),
@@ -196,7 +191,7 @@ model = dict(
         ybound=[-25.6, 25.6, 0.4],
         zbound=[-3.0, 2.0, 5.0], #[-10,10,20]
         dbound=[1.0, 60.0, 0.5],
-        downsample=1),
+        downsample=2),
     img_bev_encoder_backbone=dict(
         type='ResNetForBEVDet',
         numC_input=numC_Trans #256
@@ -211,14 +206,11 @@ model = dict(
         voxel_size=voxel_size,
         max_voxels= 150000, #(120000, 160000),
         point_cloud_range=point_cloud_range),
-    # pts_voxel_encoder=dict(
-    #     type='HardSimpleVFE',
-    #     num_features=5,
-    #     # feat_channels=[64],
-    # ),
+
+
     pts_voxel_encoder=dict(
         type='HardVFE',
-        in_channels=5,
+        in_channels=5 + 256,
         feat_channels=[64],
         with_distance=False,
         with_cluster_center=False,
@@ -292,7 +284,7 @@ model = dict(
         loss_cls=dict(type='FocalLoss', use_sigmoid=True, gamma=2, alpha=0.25, reduction='mean', loss_weight=1.0),
         loss_bbox=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
         loss_heatmap=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
-        loss_consistency=dict(type='L1Loss', reduction='mean', loss_weight=0.25),
+        loss_consistency=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=0.25),
     ),
     train_cfg=dict(
         pts=dict(
@@ -322,7 +314,8 @@ model = dict(
             out_size_factor=out_size_factor,
             pc_range=point_cloud_range[0:2],
             voxel_size=voxel_size[:2],
-            nms_type=None
+            nms_type=None,
+            post_maxsize = 100,
         )))
 optimizer = dict(type='AdamW', lr=0.0001, weight_decay=0.01)  # for 8gpu * 2sample_per_gpu, #0.0001
 optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
@@ -330,9 +323,9 @@ optimizer_config = dict(grad_clip=dict(max_norm=0.1, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=1000,
+    warmup_iters=100,
     warmup_ratio=0.01,
-    step=[10,20,30],
+    step=[5,10,15],
     gamma=0.5)
 # lr_config = dict(
 #     policy='cyclic',
@@ -353,7 +346,7 @@ log_config = dict(
            dict(type='TensorboardLoggerHook')])
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
-work_dir = "work_dirs/rcfusion_vod_voxel_new"
+work_dir = "work_dirs/rcfusion_vod_voxel_RC_A"
 load_from = None #'checkpoints/resnet50.pth' # "models/bevfusion_formal_trained_C.pth"
 # "work_dirs/bevtransfusion_vod_voxel_L/epoch_4.pth"
 # "models/bevfusion_model_r50.pth" "models/transfusionL_fade_e18.pth" 'checkpoints/fusion_voxel0075_R50.pth', "models/bevfusion_fade_e18_retrained.pth"

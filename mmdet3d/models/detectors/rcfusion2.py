@@ -18,7 +18,7 @@ from .transfusion import TransFusionDetector
 
 
 @DETECTORS.register_module()
-class RCFusion(TransFusionDetector):
+class RCFusion2(TransFusionDetector):
     def __init__(self, 
                  freeze_img_backbone=False,
                  freeze_img_neck=False,
@@ -30,7 +30,7 @@ class RCFusion(TransFusionDetector):
         self.freeze_img_backbone = freeze_img_backbone
         self.freeze_img_neck = freeze_img_neck
 
-        super(RCFusion, self).__init__(**kwargs)
+        super(RCFusion2, self).__init__(**kwargs)
 
         if img_vtransform:
             self.img_vtransform = builder.build_vtransform(
@@ -46,7 +46,7 @@ class RCFusion(TransFusionDetector):
 
     def init_weights(self, pretrained=None):
         """Initialize model weights."""
-        super(RCFusion, self).init_weights(pretrained)
+        super(RCFusion2, self).init_weights(pretrained)
         if self.with_img_backbone:
             if not pretrained==None: 
                 self.img_backbone.init_weights(pretrained=pretrained['img_backbone'])
@@ -64,26 +64,6 @@ class RCFusion(TransFusionDetector):
                 for param in self.img_neck.parameters():
                     param.requires_grad = False
 
-    def get_sparse_img(self, pts, img_feats, img_metas):
-        
-        img_meta = img_metas[0]
-        lidar2img = img_meta['lidar2img'][0]
-        lidar2img = torch.Tensor(lidar2img).cuda()
-        img_aug_matrix = torch.eye(4).cuda()
-        if 'scale_factor' in img_meta:
-            img_aug_matrix[0,0] *= img_meta['scale_factor'][0]
-            img_aug_matrix[1,1] *= img_meta['scale_factor'][1]
-        image_size = img_metas[0]['input_shape']
-        B, C, H, W = img_feats[0].shape
-        feat_down_factor = image_size[0]/H
-        # depth, RCS, doppler
-        sparse_img = torch.zeros((B, 3, H, W)).cuda()
-        for b in range(B):
-            cur_coords, on_img, depth = self.project_pts_to_image(pts[b], lidar2img, img_aug_matrix, image_size)
-            masked_coords = (cur_coords[:,on_img]/feat_down_factor).long()
-            sparse_img[b, 0, masked_coords[0], masked_coords[1]] = depth[on_img]
-            sparse_img[b, 1:3, masked_coords[0], masked_coords[1]] = pts[b][on_img, 3:5].transpose(1,0)
-        return sparse_img
 
     def extract_img_feat(self, img, img_metas, points):
         """Extract features of images."""
@@ -104,11 +84,8 @@ class RCFusion(TransFusionDetector):
             return None
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
+        
         fov_feats = img_feats
-
-        # project points to perspective sparse image
-        sparse_img = self.get_sparse_img(points, img_feats, img_metas)
-        img_feats = torch.cat((img_feats[0], sparse_img), dim=1)
         # project perspective features to BEV
         if self.with_img_vtransform:
             if not isinstance(img_feats,torch.Tensor):
@@ -122,12 +99,13 @@ class RCFusion(TransFusionDetector):
         if self.with_img_bev_encoder_neck:
             img_feats = self.img_bev_encoder_neck(img_feats)
         bev_feats = img_feats
-        return fov_feats[0], [None, [bev_feats]], img_metas
+        return [[fov_feats], [bev_feats]]
 
     def transform_img_feat(self, pts, img_feats, img_metas):
         assert 'flip' not in img_metas[0].keys() or not img_metas[0]['flip'], "not implemented"
         assert 'pcd_horizontal_flip' not in img_metas[0].keys() or not img_metas[0]['pcd_horizontal_flip'], "not implemented"
         assert  'pcd_horizontal_flip' not in img_metas[0].keys() or not img_metas[0]['pcd_vertical_flip'], "not implement"
+        
         
         lidar2camera, lidar2image, intrins, img_aug_matrices = [],[],[],torch.Tensor(0,4,4)
 
@@ -163,6 +141,22 @@ class RCFusion(TransFusionDetector):
         )
         return img_feats
 
+    def fetch_img_features(self, pts, img_feats, img_metas):
+        
+        aug_pts = []
+        for res in pts:
+            res_coords = res[:, :, :3]
+            # projects points from radar onto images 
+            cur_coords = img_metas.lidar2img[:, :3, :3].matmul(res_coords)
+            cur_coords += img_metas.lidar2img[:, :3, 3].reshape(-1, 3, 1)
+            # get 2d coords
+            dist = cur_coords[:, 2, :]
+            cur_coords[:, 2, :] = torch.clamp(cur_coords[:, 2, :], 1e-5, 1e5)
+            cur_coords[:, :2, :] /= cur_coords[:, 2:3, :]
+        
+        return aug_pts
+
+            
     def extract_pts_feat(self, pts):
         """Extract features of points."""
         if not self.with_pts_backbone:
@@ -177,58 +171,10 @@ class RCFusion(TransFusionDetector):
             x = self.pts_neck(x)
         return x
 
-    def project_pts_to_image(self, pts, lidar2img, img_aug_matrix, image_size):
-
-        res_coords = pts[:, :3].transpose(1, 0)
-        # projects points from radar onto images 
-        cur_coords = lidar2img[:3, :3].matmul(res_coords)
-        cur_coords += lidar2img[:3, 3].unsqueeze(1)
-        # get 2d coords
-        dist = cur_coords[2, :]
-        cur_coords[2, :] = torch.clamp(dist, 1e-5, 1e5)
-        cur_coords[:2, :] /= cur_coords[2, :]
-        # imgaug
-        cur_coords = img_aug_matrix[:3, :3].matmul(cur_coords)
-        cur_coords += img_aug_matrix[:3, 3].unsqueeze(1)
-        depth = cur_coords[2, :]
-        # normalize coords for grid sample
-        cur_coords = cur_coords[[1, 0]]
-        on_img = (
-            (cur_coords[0] < image_size[0])
-            & (cur_coords[0] >= 0)
-            & (cur_coords[1] < image_size[1])
-            & (cur_coords[1] >= 0)
-        )
-        return cur_coords, on_img, depth 
-
-    def fetch_img_features(self, pts, img_feats, img_metas):
-        
-        aug_pts = []
-        img_meta = img_metas[0]
-        lidar2img = img_meta['lidar2img'][0]
-        lidar2img = torch.Tensor(lidar2img).cuda()
-        img_aug_matrix = torch.eye(4).cuda()
-        if 'scale_factor' in img_meta:
-            img_aug_matrix[0,0] *= img_meta['scale_factor'][0]
-            img_aug_matrix[1,1] *= img_meta['scale_factor'][1]
-        image_size = img_metas[0]['input_shape']
-        B, C, H, W = img_feats.shape
-        feat_down_factor = image_size[0]/H
-
-        for b in range(B):
-            N = pts[b].shape[0]
-            cur_coords, on_img, _ = self.project_pts_to_image(pts[b], lidar2img, img_aug_matrix, image_size)
-            masked_coords = (cur_coords[:,on_img]/feat_down_factor).long()
-            fetch_img_feat = torch.zeros(C, N).cuda()
-            fetch_img_feat[:, on_img] = img_feats[b, :, masked_coords[0],masked_coords[1]]
-            aug_pts.append(torch.cat((pts[b],fetch_img_feat.transpose(1,0)), dim=1))
-        
-        return aug_pts
-
     def extract_feat(self, points, img, img_metas):
         """Extract features from images and points"""
-        fov_feats, img_feats, img_metas = self.extract_img_feat(img, img_metas, points)
-        points_aug = self.fetch_img_features(points, fov_feats, img_metas)
+        img_feats, img_metas = self.extract_img_feat(img, img_metas, points)
+        points_aug = self.fetch_img_features(points, img_feats[0], img_metas)
         pts_feats = self.extract_pts_feat(points_aug)
         
         return (img_feats, pts_feats)
@@ -321,8 +267,10 @@ class RCFusion(TransFusionDetector):
         Returns:
             dict: Losses of different branches.
         """
+        ## extract single modality features 
         img_feats, pts_feats = self.extract_feat(
             points, img=img, img_metas=img_metas)
+  
         losses = dict()
         if pts_feats:
             losses_pts = self.forward_pts_train(pts_feats, img_feats, gt_bboxes_3d,

@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 from torch.nn import Linear
 from torch.nn.init import xavier_uniform_, constant_, xavier_normal_
 
-from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init, xavier_init
+from mmcv.cnn import ConvModule, build_conv_layer, kaiming_init, xavier_init, ConvTranspose2d
 from mmcv.runner import force_fp32
 from mmdet3d.core import (circle_nms, draw_heatmap_gaussian, gaussian_radius,
                           xywhr2xyxyr, limit_period, PseudoSampler)
@@ -106,6 +106,7 @@ class RCFusionHead(nn.Module):
             padding=1,
             bias=bias,
         )
+        
         # heatmap for single modality
         sm_layers = []
         sm_layers.append(ConvModule(
@@ -131,17 +132,23 @@ class RCFusionHead(nn.Module):
         
         if self.fuse_img:
             self.out_size_factor_img = out_size_factor_img
-            self.shared_conv_img = build_conv_layer(
+            conv_img_layers = []
+            conv_img_layers.append(
+                nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+                )
+            conv_img_layers.append(build_conv_layer(
                 dict(type='Conv2d'),
                 in_channels_img,  # channel of img feature map
-                int(hidden_channel/2),
+                hidden_channel,
                 kernel_size=3,
                 padding=1,
                 bias=bias)
-            
+            )
+            self.shared_conv_img = nn.Sequential(*conv_img_layers)
+       
         # initilize layers after fusion
         if fuse_img:
-            hidden_channel *= 2
+            hidden_channel = hidden_channel * 2
 
         layers = []
         layers.append(ConvModule(
@@ -164,13 +171,25 @@ class RCFusionHead(nn.Module):
         self.heatmap_head = nn.Sequential(*layers)
 
         # fuser layer
-        self.fuse_layers = build_conv_layer(
-                dict(type='Conv2d'),
-                hidden_channel,  # channel of img feature map
-                hidden_channel,
-                kernel_size=3,
-                padding=1,
-                bias=bias)
+        fuse_layers = []
+        fuse_layers.append(ConvModule(
+            hidden_channel,
+            hidden_channel,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+            conv_cfg=dict(type='Conv2d'),
+            norm_cfg=dict(type='BN2d'),
+        ))
+        fuse_layers.append(build_conv_layer(
+            dict(type='Conv2d'),
+            hidden_channel,
+            hidden_channel,
+            kernel_size=3,
+            padding=1,
+            bias=bias,
+        ))
+        self.fuse_layers = nn.Sequential(*fuse_layers)
 
         self.class_encoding = nn.Conv1d(num_classes, hidden_channel, 1)
         
@@ -190,15 +209,7 @@ class RCFusionHead(nn.Module):
             heads.update(dict(heatmap=(self.num_classes, num_heatmap_convs)))
             self.prediction_heads.append(FFN(hidden_channel, heads, conv_cfg=conv_cfg, norm_cfg=norm_cfg, bias=bias))
 
-        if self.fuse_img:
-            self.out_size_factor_img = out_size_factor_img
-            self.shared_conv_img = build_conv_layer(
-                dict(type='Conv2d'),
-                in_channels_img,  # channel of img feature map
-                int(hidden_channel/2),
-                kernel_size=3,
-                padding=1,
-                bias=bias)
+       
                 
         self.init_weights()
         self._init_assigner_sampler()
@@ -302,15 +313,13 @@ class RCFusionHead(nn.Module):
         """
         self.batch_size = inputs.shape[0]
         lidar_feat = self.shared_conv(inputs)
-        # if any([meta['sample_idx']==3539 for meta in img_metas]):
-        #     print()
+  
         #################################
         # Fuse image and lidar features to BEV features
         #################################
         bev_pos = self.lidar_bev_pos.repeat(self.batch_size, 1, 1).to(lidar_feat.device)
 
         if self.fuse_img:
-            img_inputs = bev_inputs
             img_feat = self.shared_conv_img(bev_inputs)  # [BS * n_views, C, H, W]
             bev_feat = self.fuse_layers(torch.cat((lidar_feat, img_feat), dim=1))
         else:
@@ -324,6 +333,8 @@ class RCFusionHead(nn.Module):
             radar_heatmap = self.heatmap_head_radar(lidar_feat)
             img_heatmap = self.heatmap_head_img(img_feat)
 
+
+
         #################################
         # initialize with heatmap
         #################################
@@ -335,7 +346,6 @@ class RCFusionHead(nn.Module):
             # decode heatmap
             #################
             query_feat, query_pos, top_proposals_index = self.decode_heatmap(heatmap, bev_feat_flatten, bev_pos)
-
 
         #################################
         # transformer decoder layer (BEV feature as K,V)
@@ -619,12 +629,15 @@ class RCFusionHead(nn.Module):
         
             image_heatmap = clip_sigmoid(preds_dict['image_heatmap'])
             radar_heatmap = clip_sigmoid(preds_dict['radar_heatmap'])
-            radar_tp = torch.logical_and(heatmap>self.pos_thres, radar_heatmap.detach()>self.pos_thres)
-            con_weights = heatmap.new_zeros(heatmap.size())
-            con_weights[radar_tp] = 1.0
-            loss_consistency = self.loss_consistency(image_heatmap, radar_heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
-            loss_consistency += self.loss_consistency(radar_heatmap, heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
-            loss_consistency += self.loss_consistency(image_heatmap, heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
+            loss_consistency = 0
+            loss_consistency =  self.loss_consistency(image_heatmap, heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            loss_consistency +=  self.loss_consistency(radar_heatmap, heatmap, avg_factor=max(heatmap.eq(1).float().sum().item(), 1))
+            # radar_tp = torch.logical_and(heatmap>self.pos_thres, radar_heatmap.detach()>self.pos_thres)
+            # con_weights = heatmap.new_zeros(heatmap.size())
+            # con_weights[radar_tp] = 1.0
+            # loss_consistency = self.loss_consistency(image_heatmap, radar_heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
+            # loss_consistency += self.loss_consistency(radar_heatmap, heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
+            # loss_consistency += self.loss_consistency(image_heatmap, heatmap, con_weights, avg_factor=max(con_weights.eq(1).float().sum().item(), 1))
             loss_dict['loss_consistency'] = loss_consistency
         
         # compute heatmap loss
@@ -664,9 +677,7 @@ class RCFusionHead(nn.Module):
             layer_bbox_targets = bbox_targets[:, idx_layer * self.num_proposals:(idx_layer + 1) * self.num_proposals, :]
             layer_loss_bbox = self.loss_bbox(preds, layer_bbox_targets, layer_reg_weights, avg_factor=max(num_pos, 1))
 
-            # layer_iou = preds_dict['iou'][..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals].squeeze(1)
-            # layer_iou_target = ious[..., idx_layer*self.num_proposals:(idx_layer+1)*self.num_proposals]
-            # layer_loss_iou = self.loss_iou(layer_iou, layer_iou_target, layer_bbox_weights.max(-1).values, avg_factor=max(num_pos, 1))
+
 
             # from mmdet3d.core import LiDARInstance3DBoxes
             # from src.vis_utils import *

@@ -12,6 +12,7 @@ from .voxelnet import VoxelNet
 from .transfusion import TransFusionDetector
 from .bev_transfusion import BEVTransFusionDetector
 from .rcfusion import RCFusion
+from .rcfusion2 import RCFusion2
 # from plugin.futr3d.models.detectors.futr3d import FUTR3D
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     'ImVoteNet',
     'TransFusionDetector',
     'BEVTransFusionDetector',
-    'RCFusion'
+    'RCFusion',
+    'RCFusion2'
 ]
